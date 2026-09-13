@@ -40,3 +40,9 @@ jobs:
         with:
           projectPath: .
           tagName: ${{ github.ref_name }}
+          releaseName: ${{ github.ref_name }}
+          releaseBody: "Task Manager ${{ github.ref_name }} - Windows x64 installer"
+          releaseDraft: false
+          releasePrerelease: false
+          overwrite: true
+          includeInChangelog: false
