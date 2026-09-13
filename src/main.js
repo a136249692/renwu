@@ -320,7 +320,7 @@ function setDividerY(folderId, y) {
  * ═══════════════════════════════════════════════════ */
 const GRID = 22;
 const SNAP = 5;
-const DIVIDER_RATIO = 0.3;
+const DIVIDER_RATIO = 0.4;
 
 let folders = [];
 let blocks = [];
@@ -484,8 +484,14 @@ function relayout(initial) {
   }
   const { doneList, total } = layoutDoneRows();
   const need = doneList.length ? 14 + total + 46 : 0;
-  const dy = Math.max(defaultDividerY(), need);
+  const defY = defaultDividerY();
   const f = folders.find(x => x.id === activeFolderId);
+  // 待完成区高度固定的核心：floor = max(已存 dividerY, 新默认)
+  //   · 已存值 > defY（旧数据已撑大）→ 保留原值，不收缩
+  //   · 已存值 < defY（旧 30% 默认或新文件夹初始 0）→ 抬升到新默认 40%
+  // 这样：待完成区始终 ≥ 60%，已完成内容变少不会把它挤压回去
+  const floor = Math.max(f && f.dividerY || 0, defY);
+  const dy = Math.max(floor, need);
   if (f) { f.dividerY = dy; setDividerY(activeFolderId, dy); }
   paintDivider();
 
