@@ -320,7 +320,9 @@ function setDividerY(folderId, y) {
  * ═══════════════════════════════════════════════════ */
 const GRID = 22;
 const SNAP = 5;
-const DIVIDER_RATIO = 0.4;
+const DIVIDER_RATIO = 0.3;
+const MIN_DIVIDER_Y = 56; // 已完成区最小高度，防止分界线贴顶塌缩
+const CANVAS_BOTTOM_PAD = 1000; // 画布底部留白（像素），保证待完成区下方还能继续向下滚动
 
 let folders = [];
 let blocks = [];
@@ -358,10 +360,25 @@ function isStickyFolder(f) {
   return f.name === STICKY_FOLDER;
 }
 
-/* ---------- 分界线 ---------- */
+/* ---------- 分界线 ----------
+   比例由 DIVIDER_RATIO 决定（0.3 = 完成区 30% / 待完成区 70%）。
+   分界线的像素值按文件夹缓存在 localStorage 的 DIVIDER_KEY 里；
+   relayout 会用 floor = max(已存值, 新默认) 保留较大的旧值，
+   所以比例一改必须清空旧缓存，否则分界线会被旧值锁住、改了也不动。 */
+const DIVIDER_RATIO_KEY = "glassCanvas.dividerRatio";
+const DIVIDER_RATIO_VERSION = "r0.3";
+// 比例变更后清空旧的比例缓存：旧值（如 0.4 时代写入的）会在 relayout 里被
+// floor = max(已存值, 新默认) 当作下限保留，导致改比例后分界线纹丝不动。
+try {
+  if (localStorage.getItem(DIVIDER_RATIO_KEY) !== DIVIDER_RATIO_VERSION) {
+    localStorage.setItem(DIVIDER_RATIO_KEY, DIVIDER_RATIO_VERSION);
+    localStorage.removeItem(DIVIDER_KEY);
+  }
+} catch {}
+
 function defaultDividerY() {
   const h = canvas.clientHeight || window.innerHeight;
-  return Math.max(160, Math.round(h * DIVIDER_RATIO));
+  return Math.max(MIN_DIVIDER_Y, Math.round(h * DIVIDER_RATIO));
 }
 function dividerY() {
   const f = folders.find(x => x.id === activeFolderId);
@@ -456,22 +473,39 @@ function encodePos(el, b) {
 }
 
 /* 已完成块按顺序堆叠：默认按创建时间从远到近排序（旧→新），
-   手动拖动后切到自由排序（按 y 位置），杜绝重叠 */
-function layoutDoneRows() {
+   手动拖动后切到自由排序（按 y 位置）。
+   insertB 为「刚拖入完成区」的块：不靠 createdAt 插顶，而是按 drop 时的 y
+   相对已有块的位置决定插入索引，插到对应位置（顶/中/底） */
+function layoutDoneRows(insertB) {
   const mode = getDoneSortMode();
-  const doneList = blocks.filter(b => b.done).sort(
+  const others = blocks.filter(b => b.done && b !== insertB).sort(
     mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
   );
+  let insertIdx = others.length; // 默认插到最后（drop 在最下）
+  if (insertB) {
+    // 用 drop 位置对比已有块的旧 y，找到第一个「中心点在 drop 之下」的位置
+    const dropCenter = insertB.y;
+    for (let i = 0; i < others.length; i++) {
+      const el = board.querySelector(`.block[data-id="${others[i].id}"]`);
+      const h = el ? el.offsetHeight : 44;
+      if (dropCenter < others[i].y + h / 2) { insertIdx = i; break; }
+    }
+    others.splice(insertIdx, 0, insertB);
+  }
   let cursor = 14;
-  for (const b of doneList) {
+  for (const b of others) {
     b.x = 20; b.row = true;
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     const h = el ? el.offsetHeight : 44;
     b.y = cursor;
     cursor += h + 10;
   }
-  return { doneList, total: cursor - 10 };
+  return { doneList: others, total: cursor - 10 };
 }
+
+/* 下一次 relayout 要把哪个块按 drop 位置插入已完成区（拖入完成区时设置，
+   relayout 消费后立即清空；其余场景保持 null，走 createdAt/manual 排序） */
+let pendingInsert = null;
 
 /* 就地重排：只改位置/类名，不重建 DOM（无闪烁、无 blockIn 重播） */
 function relayout(initial) {
@@ -482,18 +516,37 @@ function relayout(initial) {
     el.classList.toggle("done", b.done);
     el.classList.toggle("row", b.row);
   }
-  const { doneList, total } = layoutDoneRows();
+  // insertB 是「本次刚拖入已完成区」的块，用于按 drop 位置决定插入索引；
+  // 其余场景（加载、勾选、拖回待完成）为 null，走 createdAt / manual 排序
+  const insertB = pendingInsert ? blocks.find(x => x.id === pendingInsert) : null;
+  const { doneList, total } = layoutDoneRows(insertB);
+  pendingInsert = null; // 一次性：本次插入消费后即清空，避免影响后续 relayout
   const need = doneList.length ? 14 + total + 46 : 0;
   const defY = defaultDividerY();
   const f = folders.find(x => x.id === activeFolderId);
-  // 待完成区高度固定的核心：floor = max(已存 dividerY, 新默认)
-  //   · 已存值 > defY（旧数据已撑大）→ 保留原值，不收缩
-  //   · 已存值 < defY（旧 30% 默认或新文件夹初始 0）→ 抬升到新默认 40%
-  // 这样：待完成区始终 ≥ 60%，已完成内容变少不会把它挤压回去
-  const floor = Math.max(f && f.dividerY || 0, defY);
-  const dy = Math.max(floor, need);
+  // 分界线 = max(defY, need)：
+  //   · defY 下限（30%）—— 已完成内容少时也保证有一个够大的拖入目标区，
+  //     不再因为内容少而把分界线顶到贴顶、导致「必须拖到很上边才能归入已完成」
+  //   · need 随内容增长 —— 内容多时分界线下移让位，内容始终精确容纳、不溢出
+  //   · 不再用「已存 dividerY」作下限：旧值会在内容收缩后把分界线顶住、
+  //     已完成区变小了分界线却纹丝不动，中间留一块空白
+  const dy = Math.max(defY, need);
   if (f) { f.dividerY = dy; setDividerY(activeFolderId, dy); }
   paintDivider();
+
+  // 越界清理：分界线随已完成内容下移后，原先紧贴分界线下方摆放的待完成块会
+  // 被「顶」进已完成区、被堆叠的已完成内容压住（如 E12 拖入后淹没了「123」）。
+  // 这里把上沿仍在分界线之上的待完成块逐个推回分界线下方的空位并立即落盘；
+  // 下移会腾出空位，后续越界块再落进来，链式补位直到无重叠
+  for (const b of blocks) {
+    if (b.done) continue;
+    const el3 = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el3) continue;
+    if (b.y < dy) {
+      findFreeSpot(b, dy);
+      persistBlockPosition(b);
+    }
+  }
 
   const todo = blocks.filter(b => !b.done).length;
   const done = blocks.length - todo;
@@ -505,9 +558,12 @@ function relayout(initial) {
   const topLabel = divider.querySelector(".label.top");
   if (topLabel) topLabel.textContent = done ? `已完成 ${done}` : "已完成";
 
-  let maxY = dy + 200;
+  // 画布高度：待完成块也纳入计算（否则滚到分界线下方 200px 就触底），
+  // 再额外留 CANVAS_BOTTOM_PAD 的空白区，让页面可以持续向下滚
+  let maxY = dy + CANVAS_BOTTOM_PAD;
   for (const b of blocks) {
-    if (b.done) maxY = Math.max(maxY, b.y + (board.querySelector(`.block[data-id="${b.id}"]`)?.offsetHeight || 44) + 40);
+    const el2 = board.querySelector(`.block[data-id="${b.id}"]`);
+    maxY = Math.max(maxY, b.y + (el2 ? el2.offsetHeight : 44) + 40);
   }
   board.style.height = Math.max(maxY, canvas.clientHeight - 2) + "px";
 
@@ -821,11 +877,14 @@ function startDrag(e, el, b) {
     if (!moved) return;
     // 就地更新，不复建整块画布，避免释放时闪烁
     b.x = Math.round(curX); b.y = Math.round(curY);
-    const elH2 = el.offsetHeight || elH;
-    const centerY = b.y + elH2 / 2;
-    const shouldDone = centerY < dividerY();
+    // 判定口径：块的「上沿」一跨过分界线就算已完成——向上拖时上沿最先越线，
+    // 相当于「任意一点内容越过分界线即归入已完成」，不需要整块越过、也不需要
+    // 拖到中心线以上（那是旧逻辑，导致必须拖到很上边才算数）
+    const shouldDone = b.y < dividerY();
     if (shouldDone !== b.done) {
       b.done = shouldDone; b.row = shouldDone;
+      // 拖入已完成区：记录本块，relayout 按 drop 位置决定插入索引（不再一律插顶）
+      if (shouldDone) pendingInsert = b.id;
       api.toggleTask(b.id, shouldDone);
       // 完成区由 relayout 重新堆叠；放回待完成区则用 findFreeSpot 找不重叠的位置
       if (!shouldDone) findFreeSpot(b, dividerY());
@@ -965,7 +1024,14 @@ function toggleDone(id) {
     api.toggleTask(id, true);
   } else {
     b.done = false; b.row = false;
-    findFreeSpot(b, dy);
+    // 摆放前先把分界线算对：此刻 dividerY() 还包含本块的已完成高度（本块原先
+    // 堆在已完成区底部，把分界线顶得很低），直接用它找空位会把块扔到很远下方、
+    // 待完成区顶部留下一片空白。先按「本块已离开」的已完成内容算分界线再摆放。
+    // b.done 刚置 false，layoutDoneRows 会自动排除本块，无需额外标记
+    let newDy = defaultDividerY();
+    const rows2 = layoutDoneRows(null);
+    if (rows2.total) newDy = Math.max(defaultDividerY(), 14 + rows2.total + 46);
+    findFreeSpot(b, newDy);
     api.toggleTask(id, false);
     api.moveTask(id, b.x, b.y);
   }
