@@ -1258,8 +1258,8 @@ function openUpdateModal(update, onProgress) {
       // Windows 上 install 会自动启动安装器并退出应用，这里走不到
       // macOS/Linux 需要手动 relaunch
       if (navigator.userAgent.includes("Windows")) return;
-      const { relaunch } = await import("@tauri-apps/plugin-process");
-      await relaunch();
+      const { restart } = await import("@tauri-apps/plugin-process");
+      await restart();
     } catch (err) {
       console.error("[玻光画布] 更新失败", err);
       toast("更新失败：" + (err.message || String(err)).slice(0, 60));
