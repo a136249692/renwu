@@ -40,8 +40,6 @@
             <div class="stage-header">
               <h2 id="folder-title">我的任务</h2>
               <span class="meta" id="folder-meta"></span>
-              <button class="cal-toggle" id="cal-toggle" title="切换日历模式">📅 日历</button>
-              <button class="cal-toggle" id="history-btn" title="查看变更历史">📋 历史</button>
               <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
             </div>
           </div>
@@ -61,17 +59,6 @@
               </div>
             </div>
           </div>
-          <div class="cal-wrap" id="cal-wrap" hidden>
-            <div class="cal-nav">
-              <h3 id="cal-title">2025年1月</h3>
-              <div class="nav-btns">
-                <button id="cal-prev">‹</button>
-                <button id="cal-today">今天</button>
-                <button id="cal-next">›</button>
-              </div>
-            </div>
-            <div class="cal-grid" id="cal-grid"></div>
-          </div>
         </div>
       </main>
     </div>
@@ -83,15 +70,6 @@
         <button id="sticky-cancel">取消</button>
         <button class="sticky-save" id="sticky-save">保存</button>
       </div>
-    </div>
-
-    <!-- 变更历史面板 -->
-    <div class="history-panel" id="history-panel" hidden>
-      <div class="history-header">
-        <h3>📋 变更历史</h3>
-        <button class="history-close" id="history-close">×</button>
-      </div>
-      <div class="history-content" id="history-content"></div>
     </div>
 
     <!-- 弹窗 -->
