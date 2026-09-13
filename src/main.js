@@ -378,9 +378,10 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
-/* 已完成块按顺序堆叠：按每个块的真实渲染高度累加，杜绝重叠 */
+/* 已完成块按顺序堆叠：按拖动后的 y 位置排序（支持拖动重排），
+   y 相同时按创建时间 tiebreaker，杜绝重叠 */
 function layoutDoneRows() {
-  const doneList = blocks.filter(b => b.done).sort((a, b) => a.createdAt - b.createdAt);
+  const doneList = blocks.filter(b => b.done).sort((a, b) => a.y - b.y || a.createdAt - b.createdAt);
   let cursor = 14;
   for (const b of doneList) {
     b.x = 20; b.row = true;
@@ -740,9 +741,17 @@ function startDrag(e, el, b) {
       persistBlockPosition(b);
       mirrorNow();
     } else {
-      api.moveTask(b.id, b.x, b.y);
-      el.classList.remove("done", "row");
-      encodePos(el, b);
+      // 状态没变：在当前区域内移动
+      if (b.done) {
+        // 已完成区域内拖动 → relayout 按拖动后的 y 重新堆叠（实现拖动排序）
+        relayout(false);
+        // 落盘堆叠后的新坐标
+        persistBlockPosition(b);
+      } else {
+        // 待完成区域内拖动 → 只更新坐标
+        api.moveTask(b.id, b.x, b.y);
+        encodePos(el, b);
+      }
       mirrorNow();
     }
   };
