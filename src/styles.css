@@ -259,9 +259,10 @@ body.is-dragging .bg::after { opacity: 0; }
   will-change: transform;
   contain: layout style paint;
 }
-.block.done { opacity: 0.55; }
-.block.done:hover { opacity: 0.8; }
+/* 已完成的块整体淡色显示；透明度只作用在文字上，
+   避免继承到勾选按钮（opacity 会向下相乘，导致按钮被压暗） */
 .block.done .block-title { color: var(--muted); }
+.block.done .block-meta { color: rgba(29,29,31,0.40); }
 .block.row {
   left: 20px !important; right: 20px; max-width: none; min-width: 0;
   width: auto; display: flex; align-items: center; gap: 12px;
@@ -289,16 +290,16 @@ body.is-dragging .bg::after { opacity: 0; }
   position: absolute; top: 10px; right: 10px; width: 19px; height: 19px; border-radius: 50%;
   border: 1.5px solid rgba(28,31,38,0.18); background: rgba(255,255,255,0.7);
   cursor: pointer; display: grid; place-items: center; color: #fff; font-size: 11px;
-  opacity: 0; transition: all 0.2s var(--ease);
+  opacity: 0; transition: opacity 0.2s var(--ease), border-color 0.2s var(--ease), background 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 .block:hover .block-check { opacity: 1; }
 .block-check:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .block.done .block-check {
   opacity: 1; background: var(--accent); border-color: transparent;
-  box-shadow: 0 2px 8px rgba(59, 110, 245, 0.38);
+  box-shadow: 0 2px 8px rgba(0, 113, 227, 0.38);
 }
-/* 设置开启：常驻显示卡片操作按钮 */
-body.show-card-actions .block-check,
+/* 设置开启：所有卡片操作按钮常驻显示（覆盖上面三条 opacity:0 / hover 规则） */
+body.show-card-actions .block-check { opacity: 1; }
 body.show-card-actions .block-del { opacity: 1; }
 
 .block-del {
@@ -406,7 +407,9 @@ body.show-card-actions .block-del { opacity: 1; }
 .setting-label { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text); }
 .setting-label small { display: block; font-size: 11px; color: var(--faint); margin-top: 3px; font-weight: 400; }
 .switch {
-  -webkit-appearance: none; appearance: none; position: absolute; width: 0; height: 0; opacity: 0; margin: 0;
+  -webkit-appearance: none; appearance: none; margin: 0; flex: none;
+  position: absolute; opacity: 0; pointer-events: none;
+  width: 40px; height: 24px;
 }
 .switch-track {
   flex: none; width: 40px; height: 24px; border-radius: 999px;

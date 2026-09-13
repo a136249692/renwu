@@ -10,8 +10,10 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
+        "label": "main",
         "title": "任务管理 - Task Manager",
         "width": 1100,
         "height": 760,

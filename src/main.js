@@ -1,11 +1,30 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as invokeImpl } from "@tauri-apps/api/core";
 
 /* ═══════════════════════════════════════════════════ *
  *  Tauri / localStorage 双模式适配层
  *  桌面端走 invoke → Rust/SQLite；浏览器预览走 localStorage
  * ═══════════════════════════════════════════════════ */
-const isTauri = () =>
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+// Tauri 检测：__TAURI_INTERNALS__（IPC 注入）或 withGlobalTauri 注入的 window.__TAURI__
+// 桌面端两者都在；浏览器预览里都没有 → 自动走 localStorage 兜底。
+function detectTauri() {
+  if (typeof window === "undefined") return false;
+  if ("__TAURI_INTERNALS__" in window) return true;
+  const t = window.__TAURI__;
+  return !!(t && (t.core || t.invoke));
+}
+const isTauri = detectTauri;
+
+// invoke 降级：拿到 IPC 就走原生 invoke；异常（未授权、非 Tauri 环境、
+// 命令未注册）一律返回 null，调用方回退到 localStorage，避免白屏/数据丢失。
+async function invoke(cmd, args) {
+  if (!isTauri()) return null;
+  try {
+    return await invokeImpl(cmd, args);
+  } catch (err) {
+    console.warn(`[玻光画布] invoke("${cmd}") 失败，回退 localStorage:`, err);
+    return null;
+  }
+}
 
 /* ---------- 轻量错误提示 ---------- */
 let _toastTimer = null;
@@ -74,7 +93,7 @@ const api = {
   async getFolders() {
     if (isTauri()) {
       const list = await invoke("get_folders");
-      return list.map(f => ({ ...f, dividerY: getDividerY(f.id) }));
+      if (list) return list.map(f => ({ ...f, dividerY: getDividerY(f.id) }));
     }
     const d = lsLoadAll();
     const fs = d.folders || [];
@@ -93,7 +112,7 @@ const api = {
   async createFolder(name) {
     if (isTauri()) {
       const f = await invoke("create_folder", { name });
-      return { ...f, dividerY: getDividerY(f.id) };
+      if (f) return { ...f, dividerY: getDividerY(f.id) };
     }
     const d = lsLoadAll();
     const f = { id: nextMockId(), name: name.trim() || "未命名", created_at: Date.now(), total: 0, completed: 0, dividerY: 0 };
@@ -117,7 +136,7 @@ const api = {
   async getTasks(folderId) {
     if (isTauri()) {
       const list = await invoke("get_tasks", { folderId });
-      return list.map(mapTask);
+      if (list) return list.map(mapTask);
     }
     const d = lsLoadAll();
     return (d.tasks || []).filter(t => t.folder_id === folderId).map(mapTask);
@@ -125,7 +144,7 @@ const api = {
   async createTask(folderId, title, x, y) {
     if (isTauri()) {
       const t = await invoke("create_task", { folderId, content: title, positionX: x, positionY: y });
-      return mapTask(t);
+      if (t) return mapTask(t);
     }
     const d = lsLoadAll();
     const t = { id: nextMockId(), folder_id: folderId, content: title, is_completed: 0, created_at: Date.now(), sort_order: 0, x, y };
@@ -149,7 +168,7 @@ const api = {
   async toggleTask(id, isCompleted) {
     if (isTauri()) {
       const t = await invoke("toggle_task", { id, isCompleted });
-      return mapTask(t);
+      if (t) return mapTask(t);
     }
     const d = lsLoadAll();
     const t = (d.tasks || []).find(x => x.id === id);
@@ -228,6 +247,10 @@ function dividerY() {
 function paintDivider() {
   divider.style.top = dividerY() + "px";
 }
+// 落盘一个块的坐标（桌面端写 SQLite，浏览器端写 localStorage）
+function persistBlockPosition(b) {
+  api.moveTask(b.id, b.x, b.y);
+}
 
 /* ---------- 渲染侧栏 ---------- */
 function renderFolders() {
@@ -278,11 +301,31 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
+/* 已完成块按顺序堆叠：按每个块的真实渲染高度累加，杜绝重叠 */
+function layoutDoneRows() {
+  const doneList = blocks.filter(b => b.done).sort((a, b) => a.createdAt - b.createdAt);
+  let cursor = 14;
+  for (const b of doneList) {
+    b.x = 20; b.row = true;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    const h = el ? el.offsetHeight : 44;
+    b.y = cursor;
+    cursor += h + 10;
+  }
+  return { doneList, total: cursor - 10 };
+}
+
 /* 就地重排：只改位置/类名，不重建 DOM（无闪烁、无 blockIn 重播） */
 function relayout(initial) {
-  const doneList = blocks.filter(b => b.done).sort((a, b) => a.createdAt - b.createdAt);
-  doneList.forEach((b, i) => { b.x = 16; b.row = true; b.y = 16 + i * 56; });
-  const need = doneList.length ? 16 + doneList.length * 56 + 40 : 0;
+  // 先设置类，确保按最终形态（.done/.row）算出真实高度
+  for (const b of blocks) {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el) continue;
+    el.classList.toggle("done", b.done);
+    el.classList.toggle("row", b.row);
+  }
+  const { doneList, total } = layoutDoneRows();
+  const need = doneList.length ? 14 + total + 46 : 0;
   const dy = Math.max(defaultDividerY(), need);
   const f = folders.find(x => x.id === activeFolderId);
   if (f) { f.dividerY = dy; setDividerY(activeFolderId, dy); }
@@ -298,23 +341,61 @@ function relayout(initial) {
   const topLabel = divider.querySelector(".label.top");
   if (topLabel) topLabel.textContent = done ? `已完成 ${done}` : "已完成";
 
-  const maxY = blocks.reduce((m, b) => Math.max(m, b.y + 90), 500);
-  board.style.height = Math.max(maxY + 120, canvas.clientHeight - 2) + "px";
+  let maxY = dy + 200;
+  for (const b of blocks) {
+    if (b.done) maxY = Math.max(maxY, b.y + (board.querySelector(`.block[data-id="${b.id}"]`)?.offsetHeight || 44) + 40);
+  }
+  board.style.height = Math.max(maxY, canvas.clientHeight - 2) + "px";
 
-  const doneUl = new Set(doneList.map(b => b.id));
   for (const b of blocks) {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el) continue;
-    el.classList.toggle("done", b.done);
-    el.classList.toggle("row", b.row);
     const check = el.querySelector(".block-check");
     if (check) check.textContent = b.done ? "✓" : "";
     encodePos(el, b);
-    if (doneUl.has(b.id)) {
-      // 已完成块保证排在最前（DOM 顺序），使整行在上层
-      board.appendChild(el);
-    }
   }
+  // 已完成块整体置于画布最底层
+  doneList.forEach(b => {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) board.appendChild(el);
+  });
+}
+
+/* 待完成区摆放：从分界线下方开始搜索空位，按每个块的真实尺寸判定重叠，
+   保证「拖回待完成区」时一定落在分界线下方且不与已有块重叠 */
+function findFreeSpot(b, dy) {
+  // 记录真实渲染尺寸（row 形态宽度与自由摆放不同，必须实时测量）
+  for (const o of blocks) {
+    const el = board.querySelector(`.block[data-id="${o.id}"]`);
+    if (el) { o.w = el.offsetWidth; o.h = el.offsetHeight; }
+  }
+  // 被摆放的块自身尺寸也要实时测量；待完成区形态下它不是 .row，
+  // 先把类清掉测一次，避免用「完成区整行宽度」去判重叠。
+  const selfEl = board.querySelector(`.block[data-id="${b.id}"]`);
+  if (selfEl) {
+    const cls = selfEl.classList;
+    cls.remove("done", "row");
+    b.w = selfEl.offsetWidth; b.h = selfEl.offsetHeight;
+  }
+  const dx = 120, dyStep = 78;
+  const boardW = board.clientWidth || 900;
+  // 起点必须是「分界线下方」，不能用旧坐标：已完成的块原位置在分界线上方，
+  // 直接沿用会把块放回完成区，看起来就像「标记未完成没反应」。
+  let x = Math.max(16, b.x || 16), y = dy + 28;
+  const w = Math.max(180, b.w || 200), h = Math.max(40, b.h || 48);
+  const maxX = Math.max(16, boardW - w - 16);
+  for (let tries = 0; tries < 48; tries++) {
+    const clash = blocks.some(o => {
+      if (o.id === b.id) return false;
+      const ow = Math.max(180, o.w || 200), oh = Math.max(40, o.h || 48);
+      return x < o.x + ow && x + w > o.x && y < o.y + oh && y + h > o.y;
+    });
+    if (!clash) break;
+    x += dx;
+    if (x > maxX) { x = 16; y += dyStep; }
+  }
+  b.x = Math.max(16, Math.min(x, maxX));
+  b.y = Math.max(dy + 28, y);
 }
 
 /* ---------- 生成任务块 ---------- */
@@ -575,7 +656,11 @@ function startDrag(e, el, b) {
     if (shouldDone !== b.done) {
       b.done = shouldDone; b.row = shouldDone;
       api.toggleTask(b.id, shouldDone);
+      // 完成区由 relayout 重新堆叠；放回待完成区则用 findFreeSpot 找不重叠的位置
+      if (!shouldDone) findFreeSpot(b, dividerY());
       relayout(false);
+      // 坐标必须落盘，否则刷新后会回到旧的完成区位置（看着像「标记没生效」）
+      persistBlockPosition(b);
       mirrorNow();
     } else {
       api.moveTask(b.id, b.x, b.y);
@@ -639,11 +724,11 @@ function toggleDone(id) {
   if (!b) return;
   const dy = dividerY();
   if (!b.done) {
-    b.done = true; b.row = true; b.x = 16; b.y = 16;
+    b.done = true; b.row = true; b.x = 20;
     api.toggleTask(id, true);
   } else {
     b.done = false; b.row = false;
-    b.x = Math.max(16, b.x); b.y = dy + 30;
+    findFreeSpot(b, dy);
     api.toggleTask(id, false);
     api.moveTask(id, b.x, b.y);
   }
@@ -897,12 +982,19 @@ document.addEventListener("keydown", e => {
 
 /* ---------- 启动 ---------- */
 async function boot() {
+  // 桌面端 IPC 注入是异步的，最多等 800ms 再决定走 SQLite 还是 localStorage
+  if (!isTauri()) {
+    const deadline = Date.now() + 800;
+    while (!isTauri() && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 30));
+    }
+  }
+  const mode = isTauri() ? "Tauri / SQLite" : "浏览器 / localStorage";
+  console.info("[玻光画布] 运行模式:", mode);
   renderFolders();
   if (isTauri()) {
-    // 记录存储位置，便于排查保存问题
-    try { console.info("[玻光画布] 存储信息:", await invoke("storage_info")); } catch (e) { console.error("[玻光画布] 获取存储信息失败", e); }
-  } else {
-    console.info("[玻光画布] 浏览器预览模式，数据存于 localStorage");
+    try { console.info("[玻光画布] 存储信息:", await invoke("storage_info")); }
+    catch (e) { console.error("[玻光画布] 获取存储信息失败", e); }
   }
   await reloadFolders();
   await reloadTasks();
