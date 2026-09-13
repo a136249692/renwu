@@ -4,6 +4,7 @@ name: Release
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,6 +17,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Debug
+        run: |
+          echo "hello from workflow"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "TAURI_SIGNING_PRIVATE_KEY: present"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY: MISSING"
+          fi
+        shell: bash
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -35,8 +48,8 @@ jobs:
       - name: Build Tauri
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: *** secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: *** secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: .
           releaseType: GitHub
