@@ -543,7 +543,7 @@ function relayout(initial) {
     const el3 = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el3) continue;
     if (b.y < dy) {
-      findFreeSpot(b, dy);
+      findFreeSpot(b, dy, true);
       persistBlockPosition(b);
     }
   }
@@ -581,41 +581,56 @@ function relayout(initial) {
   });
 }
 
-/* 待完成区摆放：从分界线下方开始搜索空位，按每个块的真实尺寸判定重叠，
-   保证「拖回待完成区」时一定落在分界线下方且不与已有块重叠 */
-function findFreeSpot(b, dy) {
-  // 记录真实渲染尺寸（row 形态宽度与自由摆放不同，必须实时测量）
+/* 两个矩形是否重叠（块的 y 已在调用处 clamp 到分界线下方） */
+function rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2) {
+  return x1 < x2 + w2 && x1 + w1 > x2 && y1 < y2 + h2 && y1 + h1 > y2;
+}
+/* 待完成区摆放：从分界线下方按行扫描，行内由左到右、行间由上到下、紧凑排列。
+   扫描行的 y 由「上一行块的实际底部」决定（而非固定步长）——固定步长在块高度
+   不一时会把新块压到上一行还没结束的块上，这就是便签互相重叠的根因。
+   fromTop=true：从分界线下方第一行开始扫（新便签、标记为未完成的块）。
+   fromTop=false：从该块旧 y 所在行开始扫（拖拽落点，保留用户的垂直落点）。 */
+function findFreeSpot(b, dy, fromTop) {
+  const top = dy + 16;
   for (const o of blocks) {
+    if (o.id === b.id || o.done) continue;
     const el = board.querySelector(`.block[data-id="${o.id}"]`);
     if (el) { o.w = el.offsetWidth; o.h = el.offsetHeight; }
   }
-  // 被摆放的块自身尺寸也要实时测量；待完成区形态下它不是 .row，
-  // 先把类清掉测一次，避免用「完成区整行宽度」去判重叠。
   const selfEl = board.querySelector(`.block[data-id="${b.id}"]`);
   if (selfEl) {
     const cls = selfEl.classList;
     cls.remove("done", "row");
     b.w = selfEl.offsetWidth; b.h = selfEl.offsetHeight;
   }
-  const dx = 120, dyStep = 78;
-  const boardW = board.clientWidth || 900;
-  // 起点必须是「分界线下方」，不能用旧坐标：已完成的块原位置在分界线上方，
-  // 直接沿用会把块放回完成区，看起来就像「标记未完成没反应」。
-  let x = Math.max(16, b.x || 16), y = dy + 28;
   const w = Math.max(180, b.w || 200), h = Math.max(40, b.h || 48);
+  const boardW = board.clientWidth || 900;
   const maxX = Math.max(16, boardW - w - 16);
-  for (let tries = 0; tries < 48; tries++) {
-    const clash = blocks.some(o => {
-      if (o.id === b.id) return false;
-      const ow = Math.max(180, o.w || 200), oh = Math.max(40, o.h || 48);
-      return x < o.x + ow && x + w > o.x && y < o.y + oh && y + h > o.y;
-    });
-    if (!clash) break;
-    x += dx;
-    if (x > maxX) { x = 16; y += dyStep; }
+  const xStart = fromTop ? 16 : Math.min(Math.max(16, b.x || 16), maxX);
+  const startY = fromTop ? top : Math.max(top, b.y || top);
+  for (let x = xStart, y = startY, tries = 0; tries < 80; tries++) {
+    let curX = x, placed = false, maxBottom = 0;
+    while (curX <= maxX) {
+      let rowBottom = 0;
+      for (const o of blocks) {
+        if (o.id === b.id || o.done) continue;
+        const oy = Math.max(top, o.y || 0);
+        const ow = Math.max(180, o.w || 200), oh = Math.max(40, o.h || 48);
+        if (rectsOverlap(curX, y, w, h, o.x, oy, ow, oh)) {
+          if (oy + oh > rowBottom) rowBottom = oy + oh;
+        }
+      }
+      if (rowBottom === 0) { placed = true; break; }
+      if (rowBottom > maxBottom) maxBottom = rowBottom;
+      curX += 140;
+    }
+    if (placed) { b.x = Math.min(curX, maxX); b.y = y; return; }
+    if (maxBottom === 0) break;
+    y = maxBottom + 12; // 下一行：紧贴上一行所有块的最大底部
+    x = 16;
   }
-  b.x = Math.max(16, Math.min(x, maxX));
-  b.y = Math.max(dy + 28, y);
+  b.x = Math.min(xStart, maxX);
+  b.y = Math.max(top, y);
 }
 
 /* ---------- 生成任务块 ---------- */
@@ -1031,7 +1046,7 @@ function toggleDone(id) {
     let newDy = defaultDividerY();
     const rows2 = layoutDoneRows(null);
     if (rows2.total) newDy = Math.max(defaultDividerY(), 14 + rows2.total + 46);
-    findFreeSpot(b, newDy);
+    findFreeSpot(b, newDy, true);
     api.toggleTask(id, false);
     api.moveTask(id, b.x, b.y);
   }
@@ -1333,13 +1348,44 @@ async function saveStickyNote() {
   if (!fid || !folders.find(f => f.id === fid)) {
     fid = await ensureStickyFolder();
   }
-  const dy = dividerY();
-  const nb = await api.createTask(fid, text, 16, dy + 34);
-  if (activeFolderId === fid) {
+  // 初始位置用中性值 (16, 0)：稍后由 findFreeSpot 重新计算。
+  // 不能用 dividerY() —— 用户在别的文件夹时，当前分界线属于那个文件夹，
+  // 会把便签存到便利贴文件夹里的错误位置，导致切换后与已有便签重叠。
+  const nb = await api.createTask(fid, text, 16, 0);
+
+  const prevFolderId = activeFolderId;
+  const needSwitch = prevFolderId !== fid;
+
+  if (needSwitch) {
+    // 切到便利贴文件夹：reload + render 后 DOM 才有便签块，
+    // findFreeSpot 才能读到 offsetWidth/offsetHeight 做真实尺寸碰撞检测
+    saveScroll();
+    activeFolderId = fid;
+    await reloadTasks();
+  } else {
+    nb.done = false; nb.row = false;
     blocks.push(nb);
-    renderAll();
-    findFreeSpot(nb, dy);
-    await api.moveTask(nb.id, nb.x, nb.y);
+  }
+  renderAll();
+
+  const curDy = dividerY();
+  // 待完成区紧凑排列：按创建时间排序后逐个从分界线下方第一行开始摆放，
+  // 行内由左到右、行间由上到下、间距由上一行最大底部决定（不重叠、不留大空档）
+  const pending = blocks.filter(b => !b.done).sort((a, b) => a.createdAt - b.createdAt);
+  for (const b of pending) {
+    findFreeSpot(b, curDy, true);
+  }
+  for (const b of blocks) {
+    if (b.done) continue;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) encodePos(el, b);
+    api.moveTask(b.id, b.x, b.y); // 落盘：刷新后仍是紧凑排列
+  }
+
+  if (needSwitch) {
+    // 切回原文件夹：用户本来就在别的任务夹里按的 Ctrl+Q，不该被带过去
+    activeFolderId = prevFolderId;
+    await reloadTasks();
     renderAll();
   }
   closeStickyPopup();
