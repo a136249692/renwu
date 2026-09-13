@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>玻光画布 · 任务管理</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <!-- 背景光晕 -->
+    <div class="bg">
+      <div class="blob b1"></div>
+      <div class="blob b2"></div>
+      <div class="blob b3"></div>
+    </div>
+
+    <div class="app">
+      <!-- 侧边栏 -->
+      <aside class="sidebar glass">
+        <div class="brand">
+          <div class="logo">✦</div>
+          <div>
+            <h1>玻光画布</h1>
+            <small>自由摆放 · 本地保存</small>
+          </div>
+        </div>
+        <button class="new-folder-btn" id="new-folder-btn">＋ 新建任务夹</button>
+        <ul class="folder-list" id="folder-list"></ul>
+        <div class="side-foot">
+          <button id="export-btn">导出</button>
+          <button id="import-btn">导入</button>
+        </div>
+      </aside>
+
+      <!-- 画布区 -->
+      <main class="stage">
+        <div class="canvas-wrap glass" id="canvas-wrap">
+          <div class="canvas-header">
+            <div class="stage-header">
+              <h2 id="folder-title">我的任务</h2>
+              <span class="meta" id="folder-meta"></span>
+              <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
+            </div>
+          </div>
+          <div class="canvas" id="canvas">
+            <div class="board" id="board">
+              <div class="board-divider" id="divider">
+                <span class="label top" id="done-label">已完成</span>
+                <span class="label bottom" id="pending-label">待完成</span>
+              </div>
+              <div class="guide v" id="guide-v" hidden></div>
+              <div class="guide h" id="guide-h" hidden></div>
+              <div class="done-hint" id="done-hint" hidden>把块拖到分界线上方即为完成</div>
+              <div class="board-empty" id="board-empty">
+                <b>双击空白处</b> 即可输入任务<br />
+                输入完成后，把块拖到任意位置摆放<br />
+                拖到分界线上方即为「已完成」，下方为「待完成」
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- 弹窗 -->
+    <div class="modal-overlay" id="modal" hidden>
+      <div class="modal">
+        <h3 id="modal-title">新建任务夹</h3>
+        <input id="folder-name-input" placeholder="请输入任务夹名称" maxlength="30" />
+        <div class="modal-actions">
+          <button id="modal-cancel">取消</button>
+          <button class="primary" id="modal-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <input type="file" id="import-file" accept="application/json" hidden />
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
