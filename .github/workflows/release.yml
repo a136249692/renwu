@@ -1,13 +1,16 @@
 name: Release
 
-on:
+"on":
   push:
     tags:
       - "v*"
   workflow_dispatch:
-
-# Only build & publish for tag pushes (ignore main branch pushes)
-# (Comment — YAML key filters live in `if:` on the job below.)
+    inputs:
+      dry_run:
+        description: "Just print signing key diagnostics, skip build"
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -16,6 +19,7 @@ jobs:
   build-and-release:
     name: Build & publish release
     runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout
