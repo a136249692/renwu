@@ -127,6 +127,22 @@ window.addEventListener("unhandledrejection", ev => {
 
 const DIVIDER_KEY = "glassCanvas.dividers";
 const SCROLL_KEY = "glassCanvas.scroll";
+const DONE_SORT_KEY = "glassCanvas.doneSort";
+
+/* 已完成区排序模式：默认按日期（旧→新），手动拖动后切到自由排序 */
+function getDoneSortMode() {
+  try {
+    const m = JSON.parse(localStorage.getItem(DONE_SORT_KEY) || "{}");
+    return m[activeFolderId] || "date";
+  } catch { return "date"; }
+}
+function setDoneSortMode(mode) {
+  try {
+    const m = JSON.parse(localStorage.getItem(DONE_SORT_KEY) || "{}");
+    m[activeFolderId] = mode;
+    localStorage.setItem(DONE_SORT_KEY, JSON.stringify(m));
+  } catch {}
+}
 
 /* ---------- localStorage 模拟后端（浏览器预览用） ---------- */
 function lsLoadAll() {
@@ -385,9 +401,13 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
-/* 已完成块按顺序堆叠：按创建时间从远到近排序（旧→新），杜绝重叠 */
+/* 已完成块按顺序堆叠：默认按创建时间从远到近排序（旧→新），
+   手动拖动后切到自由排序（按 y 位置），杜绝重叠 */
 function layoutDoneRows() {
-  const doneList = blocks.filter(b => b.done).sort((a, b) => a.createdAt - b.createdAt);
+  const mode = getDoneSortMode();
+  const doneList = blocks.filter(b => b.done).sort(
+    mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
+  );
   let cursor = 14;
   for (const b of doneList) {
     b.x = 20; b.row = true;
@@ -751,7 +771,8 @@ function startDrag(e, el, b) {
     } else {
       // 状态没变：在当前区域内移动
       if (b.done) {
-        // 已完成区域内拖动 → relayout 按日期重排并落盘所有块
+        // 已完成区域内拖动 → 切到自由排序，按拖动位置重排并落盘
+        setDoneSortMode("manual");
         relayout(false);
         persistAllDonePositions();
       } else {
@@ -818,6 +839,8 @@ function toggleDone(id) {
   const dy = dividerY();
   if (!b.done) {
     b.done = true; b.row = true; b.x = 20;
+    // 自由排序模式下，新完成的块放在底部（给一个很大的 y，排序时自然垫底）
+    if (getDoneSortMode() === "manual") b.y = 999999;
     api.toggleTask(id, true);
   } else {
     b.done = false; b.row = false;
