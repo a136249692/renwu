@@ -18,37 +18,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate signing key
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          set +e
-          echo "=== Signing key diagnostics ==="
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "FAIL: TAURI_SIGNING_PRIVATE_KEY secret is empty or missing."
-            exit 1
-          fi
-          LEN=${#TAURI_SIGNING_PRIVATE_KEY}
-          FIRST=$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | head -c 24)
-          LAST=$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tail -c 24)
-          echo "Total length: $LEN (expected 348)"
-          echo "First 24 chars: $FIRST"
-          echo "Last  24 chars: $LAST"
-          if ! printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > /tmp/key.bin 2> /tmp/b64err.txt; then
-            echo "FAIL: base64 decode error: $(cat /tmp/b64err.txt)"
-            echo "The base64 library reports the position of the first invalid character."
-            echo "If you pasted this secret in the GitHub UI, a character may have been corrupted."
-            exit 1
-          fi
-          DECODED=$(wc -c < /tmp/key.bin)
-          echo "Decoded size: $DECODED bytes (expected 259)"
-          if ! head -c 60 /tmp/key.bin | grep -q "untrusted comment: rsign"; then
-            echo "FAIL: Decoded key does not look like a minisign signing key."
-            exit 1
-          fi
-          echo "OK: Signing key looks valid."
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -68,8 +37,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: .
           tagName: ${{ github.ref_name }}
-          includeUpdaterJson: true
