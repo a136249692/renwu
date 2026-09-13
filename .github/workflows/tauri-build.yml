@@ -1,16 +1,10 @@
 name: Release
 
-"on":
+on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Just print signing key diagnostics, skip build"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
