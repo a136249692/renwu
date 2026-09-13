@@ -18,18 +18,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Debug
-        run: |
-          echo "hello from workflow"
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "GITHUB_SHA=$GITHUB_SHA"
-          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "TAURI_SIGNING_PRIVATE_KEY: present"
-          else
-            echo "TAURI_SIGNING_PRIVATE_KEY: MISSING"
-          fi
-        shell: bash
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -52,10 +40,5 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: .
-          releaseType: GitHub
-          updaterJson: true
-
-      - name: List artifacts
-        run: |
-          find . -name "*.exe" -o -name "*.sig" -o -name "latest.json" | head -50
-        shell: bash
+          tagName: ${{ github.ref_name }}
+          includeUpdaterJson: true
