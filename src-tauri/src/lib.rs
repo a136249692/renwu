@@ -27,7 +27,8 @@ pub fn run() {
             toggle_task,
             reorder_tasks,
             delete_task,
-            storage_info
+            storage_info,
+            open_data_dir
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -51,6 +52,26 @@ fn storage_info(app: tauri::AppHandle) -> String {
     } else {
         format!("db_dir={dir} | 数据库锁定")
     }
+}
+
+/// 用系统文件管理器打开数据目录，便于用户手动备份/迁移 SQLite 数据库
+#[tauri::command]
+fn open_data_dir(app: tauri::AppHandle) -> Result<String, String> {
+    use std::process::Command;
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    let path = dir.to_string_lossy().to_string();
+    let result = if cfg!(windows) {
+        Command::new("explorer.exe").arg(&path).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(&path).spawn()
+    } else {
+        Command::new("xdg-open").arg(&path).spawn()
+    };
+    result.map_err(|e| format!("无法打开数据目录: {e}"))?;
+    Ok(path)
 }
 
 #[tauri::command]

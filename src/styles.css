@@ -404,6 +404,15 @@ body.show-card-actions .block-del { opacity: 1; }
   display: flex; align-items: center; gap: 12px; cursor: pointer;
   padding: 4px 2px;
 }
+.setting-row-btn { cursor: default; }
+.link-btn {
+  flex: none; font: inherit; font-size: 13px; color: var(--accent);
+  background: transparent; border: 1px solid var(--accent);
+  padding: 5px 14px; border-radius: 8px; cursor: pointer;
+  transition: background 0.18s var(--ease);
+}
+.link-btn:hover { background: rgba(59, 110, 245, 0.1); }
+.link-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .setting-label { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text); }
 .setting-label small { display: block; font-size: 11px; color: var(--faint); margin-top: 3px; font-weight: 400; }
 .switch {

@@ -275,6 +275,11 @@ const api = {
     d.tasks = (d.tasks || []).filter(x => x.id !== id);
     lsSaveAll(d);
   },
+  /* 打开数据目录：仅桌面端支持，浏览器预览模式下按钮会被隐藏 */
+  async openDataDir() {
+    if (!isTauri()) return null;
+    return invoke("open_data_dir");
+  },
 };
 
 /* ---------- 分界线位置（localStorage，纯前端偏好） ---------- */
@@ -969,6 +974,9 @@ function applySettings() {
   document.body.classList.toggle("show-card-actions", settings.cardActions);
   const cb = $("set-card-actions");
   if (cb) cb.checked = settings.cardActions;
+  // 数据目录按钮仅桌面端可用；浏览器预览模式隐藏（避免误点）
+  const dd = $("open-data-dir");
+  if (dd) dd.hidden = !isTauri();
 }
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 const settingsModal = $("settings-modal");
@@ -981,6 +989,20 @@ settingsModal.addEventListener("click", e => { if (e.target === settingsModal) s
 $("set-card-actions").addEventListener("change", e => {
   settings.cardActions = e.target.checked;
   applySettings(); saveSettings();
+});
+$("open-data-dir").addEventListener("click", async () => {
+  const btn = $("open-data-dir");
+  btn.disabled = true; btn.textContent = "打开中…";
+  try {
+    const path = await api.openDataDir();
+    if (path) toast(`已打开数据目录：${path}`);
+    else toast("浏览器预览模式下不支持打开数据目录");
+  } catch (e) {
+    console.error("[玻光画布] 打开数据目录失败", e);
+    toast("打开数据目录失败，请检查路径权限。");
+  } finally {
+    btn.disabled = false; btn.textContent = "打开";
+  }
 });
 loadSettings();
 
