@@ -1,4 +1,5 @@
 import { invoke as invokeImpl } from "@tauri-apps/api/core";
+import { check as checkUpdate } from "@tauri-apps/plugin-updater";
 
 /* ═══════════════════════════════════════════════════ *
  *  Tauri / localStorage 双模式适配层
@@ -1175,6 +1176,12 @@ function applySettings() {
   // 数据目录按钮仅桌面端可用；浏览器预览模式隐藏（避免误点）
   const dd = $("open-data-dir");
   if (dd) dd.hidden = !isTauri();
+  // 更新相关按钮仅桌面端可用；浏览器预览模式隐藏
+  const cu = $("check-update-btn");
+  if (cu) cu.hidden = !isTauri();
+  // 冷启动自动检查开关：默认开启
+  const ua = $("update-auto");
+  if (ua) ua.checked = localStorage.getItem("glassCanvas.update.auto") !== "0";
 }
 function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
 const settingsModal = $("settings-modal");
@@ -1203,6 +1210,109 @@ $("open-data-dir").addEventListener("click", async () => {
   }
 });
 loadSettings();
+
+/* ---------- 自动更新 ----------
+ * Tauri updater 插件：check() 取 latest.json → 对比当前版本 → 下载签名包 → install 触发安装器。
+ * dialog=false，所以事件与回调都由我们自己处理；进度通过 onEvent 回调推 UI。
+ * 浏览器预览模式（无 Tauri）不显示更新入口，check() 会抛错，兜底 toast。 */
+const UPDATE_DISMISS_KEY = "glassCanvas.update.dismissed";
+const UPDATE_AUTO_KEY = "glassCanvas.update.auto";
+function updateVersion() {
+  return "1.0.0";
+}
+async function fetchCurrentVersion() {
+  try {
+    const { getVersion } = await import("@tauri-apps/api/app");
+    return await getVersion();
+  } catch { return updateVersion(); }
+}
+/* 打开更新弹窗，传 update 对象。update.body 是 GitHub Release body（Markdown） */
+function openUpdateModal(update, onProgress) {
+  const m = $("update-modal");
+  $("update-version").textContent = update.version;
+  $("update-notes").textContent = update.body || "（此版本没有更新说明）";
+  $("update-progress").classList.remove("show");
+  $("update-cancel").hidden = false;
+  $("update-install").hidden = false;
+  $("update-install").textContent = "下载并安装";
+  m.hidden = false;
+  // 下载进度回调：onEvent({event:'Started'|'Progress'|'Finished', data:{contentLength?|chunkLength}})
+  let total = 0, done = 0;
+  onProgress = onProgress || (e => {
+    if (e.event === "Started") {
+      total = e.data.contentLength || 0;
+      $("update-progress").classList.add("show");
+      $("update-bar").style.width = "0%";
+    } else if (e.event === "Progress") {
+      done += e.data.chunkLength;
+      if (total > 0) $("update-bar").style.width = Math.min(100, done * 100 / total) + "%";
+      else $("update-bar").style.width = "100%";
+    }
+  });
+  $("update-install").onclick = async () => {
+    $("update-install").disabled = true;
+    $("update-cancel").disabled = true;
+    $("update-progress").classList.add("show");
+    try {
+      await update.downloadAndInstall(onProgress);
+      // Windows 上 install 会自动启动安装器并退出应用，这里走不到
+      // macOS/Linux 需要手动 relaunch
+      if (navigator.userAgent.includes("Windows")) return;
+      const { relaunch } = await import("@tauri-apps/plugin-process");
+      await relaunch();
+    } catch (err) {
+      console.error("[玻光画布] 更新失败", err);
+      toast("更新失败：" + (err.message || String(err)).slice(0, 60));
+      $("update-install").disabled = false;
+      $("update-cancel").disabled = false;
+      $("update-progress").classList.remove("show");
+    }
+  };
+}
+function closeUpdateModal() { $("update-modal").hidden = true; }
+$("update-cancel").addEventListener("click", closeUpdateModal);
+$("update-dismiss").addEventListener("click", () => {
+  localStorage.setItem(UPDATE_DISMISS_KEY, String(Date.now()));
+  closeUpdateModal();
+});
+$("update-modal").addEventListener("click", e => { if (e.target === $("update-modal")) closeUpdateModal(); });
+
+/* 检查更新：手动调用（设置页按钮）+ 冷启动自动检查。
+ * 冷启动检查 24h 内已 dismiss 过则跳过。 */
+async function checkForUpdates(silent) {
+  if (!isTauri()) return;
+  try {
+    const update = await checkUpdate();
+    if (!update) {
+      if (!silent) toast("已是最新版本");
+      return;
+    }
+    // 冷启动静默模式下：若 24h 内用户已点过「稍后」，就不再打扰
+    if (silent) {
+      const dismissed = Number(localStorage.getItem(UPDATE_DISMISS_KEY) || 0);
+      if (Date.now() - dismissed < 24 * 3600 * 1000) return;
+    }
+    openUpdateModal(update);
+  } catch (err) {
+    console.warn("[玻光画布] 检查更新失败", err);
+    if (!silent) toast("检查更新失败：" + (err.message || String(err)).slice(0, 60));
+  }
+}
+/* 设置页：手动检查 + 显示当前版本 */
+$("check-update-btn").addEventListener("click", async () => {
+  const btn = $("check-update-btn");
+  btn.disabled = true; btn.textContent = "检查中…";
+  try { await checkForUpdates(false); }
+  finally { btn.disabled = false; btn.textContent = "检查更新"; }
+});
+/* 冷启动自动检查开关：默认开启，关掉则持久禁用 */
+$("update-auto").addEventListener("change", e => {
+  localStorage.setItem(UPDATE_AUTO_KEY, e.target.checked ? "1" : "0");
+  toast(e.target.checked ? "已开启冷启动自动检查" : "已关闭冷启动自动检查，仅手动触发");
+});
+/* 显示当前版本到设置页 */
+fetchCurrentVersion().then(v => { $("app-version").textContent = "当前版本 v" + v; });
+$("app-version").addEventListener("click", () => checkForUpdates(false));
 
 /* ---------- 导出 / 导入 ---------- */
 $("export-btn").addEventListener("click", () => {
@@ -1438,6 +1548,10 @@ async function boot() {
   renderAll();
   // 绑定便利贴按钮
   bindStickyEvents();
+  // 冷启动检查更新：延后 1.5s，避免与初始化抢带宽；用户关掉自动检查则跳过
+  if (isTauri() && localStorage.getItem(UPDATE_AUTO_KEY) !== "0") {
+    setTimeout(() => checkForUpdates(true), 1500);
+  }
   // 窗口关闭前保存滚动位置
   window.addEventListener("beforeunload", saveScroll);
 }

@@ -97,8 +97,36 @@
           <span class="setting-label">数据目录<br /><small>用系统文件管理器打开 SQLite 数据库所在目录，便于手动备份</small></span>
           <button id="open-data-dir" class="link-btn">打开</button>
         </div>
+        <div class="setting-row setting-row-btn">
+          <span class="setting-label">检查更新<br /><small>手动拉取 GitHub Releases 的最新版本，与本地版本对比</small></span>
+          <button id="check-update-btn" class="link-btn">检查更新</button>
+        </div>
+        <div class="setting-row setting-row-btn">
+          <span class="setting-label">冷启动自动检查<br /><small>关闭后只在手动点击「检查更新」时才会弹更新提示</small></span>
+          <input type="checkbox" id="update-auto" class="switch" checked />
+          <span class="switch-track" aria-hidden="true"></span>
+        </div>
+        <div class="app-version" id="app-version">当前版本 v1.0.0</div>
         <div class="modal-actions">
           <button class="primary" id="settings-ok">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 更新弹窗 -->
+    <div class="modal-overlay" id="update-modal" hidden>
+      <div class="modal modal-update">
+        <h3>发现新版本 <span id="update-version">v1.0.0</span></h3>
+        <div class="update-notes" id="update-notes">（此版本没有更新说明）</div>
+        <div class="update-progress" id="update-progress">
+          <div class="update-bar-wrap">
+            <div class="update-bar" id="update-bar" style="width:0%"></div>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button id="update-dismiss">稍后</button>
+          <button id="update-cancel">取消</button>
+          <button class="primary" id="update-install">下载并安装</button>
         </div>
       </div>
     </div>

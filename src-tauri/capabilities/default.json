@@ -5,6 +5,12 @@
   "windows": ["main", "main*"],
   "permissions": [
     "core:default",
-    "opener:default"
+    "opener:default",
+    "updater:default",
+    "updater:allow-check",
+    "updater:allow-download-and-install",
+    "process:default",
+    "process:allow-restart",
+    "process:allow-relaunch"
   ]
 }
