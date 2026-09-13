@@ -13,7 +13,6 @@ jobs:
   build-and-release:
     name: Build & publish release
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
 
     steps:
       - name: Checkout
@@ -24,6 +23,7 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
+          set +e
           echo "=== Signing key diagnostics ==="
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             echo "FAIL: TAURI_SIGNING_PRIVATE_KEY secret is empty or missing."
@@ -37,17 +37,8 @@ jobs:
           echo "Last  24 chars: $LAST"
           if ! printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | base64 -d > /tmp/key.bin 2> /tmp/b64err.txt; then
             echo "FAIL: base64 decode error: $(cat /tmp/b64err.txt)"
-            python3 <<'PYEOF'
-import os, re
-k = os.environ['TAURI_SIGNING_PRIVATE_KEY']
-for i, c in enumerate(k):
-    if not re.match(r'^[A-Za-z0-9+/=]$', c):
-        print(f"First invalid char at offset {i}: {c!r} (ord={ord(c)})")
-        print(f"Context around it: ...{k[max(0,i-20):i]}<HERE>{k[i+1:i+21]}...")
-        break
-else:
-    print("All chars look like valid base64 alphabet; length may be wrong.")
-PYEOF
+            echo "The base64 library reports the position of the first invalid character."
+            echo "If you pasted this secret in the GitHub UI, a character may have been corrupted."
             exit 1
           fi
           DECODED=$(wc -c < /tmp/key.bin)
