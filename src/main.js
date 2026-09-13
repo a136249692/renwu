@@ -14,15 +14,92 @@ function detectTauri() {
 }
 const isTauri = detectTauri;
 
-// invoke 降级：拿到 IPC 就走原生 invoke；异常（未授权、非 Tauri 环境、
-// 命令未注册）一律返回 null，调用方回退到 localStorage，避免白屏/数据丢失。
+/* ---------- IPC 健康跟踪 ----------
+ * invoke 失败时仍返回 null（api 方法用 if(result) 判空，null 自动回退 localStorage），
+ * 但副作用里累计失败次数、标记降级、触发分级告警；恢复时触发回灌迁移。 */
+const ipcState = {
+  failures: 0,       // 累计 IPC 失败次数
+  fallback: false,   // 当前是否处于降级模式（IPC 挂了，走 localStorage）
+  toastShown: false, // 本次会话是否已弹过首次告警
+  lastTier: 0,       // 上次告警达到的阈值档位（1=首次, 2=10次, 3=50次）
+};
+
 async function invoke(cmd, args) {
   if (!isTauri()) return null;
   try {
-    return await invokeImpl(cmd, args);
+    const result = await invokeImpl(cmd, args);
+    if (ipcState.fallback) {
+      // IPC 从故障恢复 → 标记解除，并尝试把降级期写入 localStorage 的孤儿数据回灌 SQLite
+      ipcState.fallback = false;
+      migrateOrphansToSqlite();
+    }
+    return result;
   } catch (err) {
-    console.warn(`[玻光画布] invoke("${cmd}") 失败，回退 localStorage:`, err);
+    ipcState.failures++;
+    ipcState.fallback = true;
+    console.warn(`[玻光画布] invoke("${cmd}") 失败，已切换 localStorage:`, err);
+    notifyFallback();
     return null;
+  }
+}
+
+/* 分级告警：首次失败立即弹；之后累计 10/50 次时各弹一次更新，避免连环弹 */
+function notifyFallback() {
+  if (!ipcState.toastShown) {
+    ipcState.toastShown = true;
+    ipcState.lastTier = 1;
+    toast("数据库连接异常，已切换本地缓存。数据仍在本机可用，但重启后可能丢失。");
+    return;
+  }
+  const tiers = [[10, 2], [50, 3]];
+  for (const [threshold, tier] of tiers) {
+    if (ipcState.failures >= threshold && ipcState.lastTier < tier) {
+      ipcState.lastTier = tier;
+      toast(`数据库仍异常（已累计 ${ipcState.failures} 次）。请检查路径权限或重启应用。`);
+      return;
+    }
+  }
+}
+
+/* 回灌迁移：IPC 恢复后，把降级期间写入 localStorage 的孤儿数据导回 SQLite。
+ * 仅在「曾发生过降级」时执行；迁移成功后清空 localStorage 孤儿数据。 */
+async function migrateOrphansToSqlite() {
+  let data;
+  try { data = lsLoadAll(); }
+  catch { return; }
+  const orphanFolders = data.folders || [];
+  const orphanTasks = data.tasks || [];
+  if (!orphanFolders.length && !orphanTasks.length) return;
+  console.info(`[玻光画布] IPC 已恢复，开始回灌 ${orphanFolders.length} 个夹 / ${orphanTasks.length} 个任务`);
+  // 建立「旧 folderId → 新 folderId」映射，避免重复创建
+  const folderMap = new Map();
+  const existingFolders = await invokeImpl("get_folders");
+  for (const orphan of orphanFolders) {
+    const dup = (existingFolders || []).find(f => f.name === orphan.name);
+    if (dup) { folderMap.set(orphan.id, dup.id); continue; }
+    const created = await invokeImpl("create_folder", { name: orphan.name });
+    if (created) folderMap.set(orphan.id, created.id);
+  }
+  let migrated = 0;
+  for (const ot of orphanTasks) {
+    const fid = folderMap.get(ot.folder_id);
+    if (!fid) continue;
+    try {
+      const t = await invokeImpl("create_task", {
+        folderId: fid, content: ot.content,
+        positionX: ot.x || 16, positionY: ot.y || 100,
+      });
+      if (t && ot.is_completed) await invokeImpl("toggle_task", { id: t.id, isCompleted: true });
+      if (t) migrated++;
+    } catch (e) { console.warn("[玻光画布] 回灌任务失败:", ot.id, e); }
+  }
+  // 迁移完成的孤儿数据清空，避免下次重复回灌
+  try { localStorage.removeItem("glassCanvas.v1"); } catch (_) {}
+  console.info(`[玻光画布] 回灌完成，迁移 ${migrated} 个任务`);
+  if (migrated > 0) {
+    toast(`数据库已恢复，${migrated} 条本地缓存已同步。`);
+    // 重新加载当前夹，让回灌的数据出现在画布上
+    if (activeFolderId) { await reloadFolders(); await reloadTasks(); renderAll(); }
   }
 }
 
@@ -995,6 +1072,8 @@ async function boot() {
   if (isTauri()) {
     try { console.info("[玻光画布] 存储信息:", await invoke("storage_info")); }
     catch (e) { console.error("[玻光画布] 获取存储信息失败", e); }
+    // 上一次会话若降级过，localStorage 里可能留有孤儿数据；IPC 可用后立即回灌
+    await migrateOrphansToSqlite();
   }
   await reloadFolders();
   await reloadTasks();
