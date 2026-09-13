@@ -328,6 +328,13 @@ function paintDivider() {
 function persistBlockPosition(b) {
   api.moveTask(b.id, b.x, b.y);
 }
+/* relayout 重排后，所有已完成块的 y 都变了（堆叠位置被重新分配），
+   必须全部落盘，否则刷新后只有被拖的块坐标是对的，其他块回到旧位置导致顺序错乱 */
+function persistAllDonePositions() {
+  for (const b of blocks) {
+    if (b.done) persistBlockPosition(b);
+  }
+}
 
 /* ---------- 渲染侧栏 ---------- */
 function renderFolders() {
@@ -378,10 +385,9 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
-/* 已完成块按顺序堆叠：按拖动后的 y 位置排序（支持拖动重排），
-   y 相同时按创建时间 tiebreaker，杜绝重叠 */
+/* 已完成块按顺序堆叠：按创建时间从远到近排序（旧→新），杜绝重叠 */
 function layoutDoneRows() {
-  const doneList = blocks.filter(b => b.done).sort((a, b) => a.y - b.y || a.createdAt - b.createdAt);
+  const doneList = blocks.filter(b => b.done).sort((a, b) => a.createdAt - b.createdAt);
   let cursor = 14;
   for (const b of doneList) {
     b.x = 20; b.row = true;
@@ -737,16 +743,17 @@ function startDrag(e, el, b) {
       // 完成区由 relayout 重新堆叠；放回待完成区则用 findFreeSpot 找不重叠的位置
       if (!shouldDone) findFreeSpot(b, dividerY());
       relayout(false);
-      // 坐标必须落盘，否则刷新后会回到旧的完成区位置（看着像「标记没生效」）
-      persistBlockPosition(b);
+      // 所有已完成块的堆叠位置都变了，必须全部落盘
+      persistAllDonePositions();
+      // 拖回待完成区的块自身坐标也要落盘
+      if (!shouldDone) persistBlockPosition(b);
       mirrorNow();
     } else {
       // 状态没变：在当前区域内移动
       if (b.done) {
-        // 已完成区域内拖动 → relayout 按拖动后的 y 重新堆叠（实现拖动排序）
+        // 已完成区域内拖动 → relayout 按日期重排并落盘所有块
         relayout(false);
-        // 落盘堆叠后的新坐标
-        persistBlockPosition(b);
+        persistAllDonePositions();
       } else {
         // 待完成区域内拖动 → 只更新坐标
         api.moveTask(b.id, b.x, b.y);
@@ -819,6 +826,7 @@ function toggleDone(id) {
     api.moveTask(id, b.x, b.y);
   }
   relayout(false);
+  persistAllDonePositions();
   mirrorNow();
 }
 function removeBlock(id) {
