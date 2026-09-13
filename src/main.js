@@ -233,10 +233,9 @@ function paintDivider() {
 function renderFolders() {
   folderListEl.innerHTML = "";
   folders.forEach(f => {
-    const cnt = blocks.filter(b => b.folderId === f.id && !b.done).length;
     const li = document.createElement("li");
     li.className = "folder-item" + (f.id === activeFolderId ? " active" : "");
-    li.innerHTML = `<span class="ico">📁</span><span class="name"></span><span class="cnt">${cnt}</span><button class="rm" title="删除任务夹">×</button>`;
+    li.innerHTML = `<span class="ico">📁</span><span class="name"></span><button class="rm" title="删除任务夹">×</button>`;
     li.querySelector(".name").textContent = f.name;
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm")) return;
@@ -365,7 +364,14 @@ function makeBlock(b) {
   });
   title.addEventListener("blur", () => {
     const txt = getTitleText(title);
-    const final = txt.trim() ? txt : b.title;
+    // 空白内容块不保存：直接删除该块（含后端记录）
+    if (!txt.trim()) {
+      el.classList.remove("editing");
+      title.contentEditable = "false";
+      removeBlock(b.id);
+      return;
+    }
+    const final = txt;
     b.title = final;
     title.textContent = final;
     title.contentEditable = "false";
@@ -386,6 +392,10 @@ function makeBlock(b) {
   });
 
   el.addEventListener("pointerdown", e => startDrag(e, el, b));
+  el.addEventListener("click", e => {
+    if (e.target.closest(".block-check") || e.target.closest(".block-del")) return;
+    selectBlock(b.id);
+  });
   return el;
 }
 
@@ -596,6 +606,34 @@ function snapFlat(nx, ny, xLines, yLines) {
 }
 
 /* ---------- 任务操作 ---------- */
+let selectedBlockId = null;
+function clearSelection() {
+  selectedBlockId = null;
+  board.querySelectorAll(".block.selected").forEach(el => el.classList.remove("selected"));
+}
+function selectBlock(id) {
+  clearSelection();
+  selectedBlockId = id;
+  const el = board.querySelector(`.block[data-id="${id}"]`);
+  if (el) el.classList.add("selected");
+}
+async function copySelectedBlock() {
+  if (selectedBlockId == null) return false;
+  const b = blocks.find(x => x.id === selectedBlockId);
+  if (!b) return false;
+  const text = b.title || "";
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (_) {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy"); } catch (_) {}
+    ta.remove();
+  }
+  toast("已复制任务内容");
+  return true;
+}
 function toggleDone(id) {
   const b = blocks.find(x => x.id === id);
   if (!b) return;
@@ -617,6 +655,7 @@ function removeBlock(id) {
   api.deleteTask(id);
   const el = board.querySelector(`.block[data-id="${id}"]`);
   if (el) el.remove();
+  if (id === selectedBlockId) clearSelection();
   relayout(false);
   mirrorNow();
 }
@@ -714,6 +753,35 @@ $("modal-ok").addEventListener("click", async () => {
 });
 nameInput.addEventListener("keydown", e => { if (e.key === "Enter") $("modal-ok").click(); });
 
+/* ---------- 设置 ---------- */
+const SETTINGS_KEY = "glassCanvas.settings";
+const settings = { cardActions: false };
+function loadSettings() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}");
+    settings.cardActions = !!s.cardActions;
+  } catch {}
+  applySettings();
+}
+function applySettings() {
+  document.body.classList.toggle("show-card-actions", settings.cardActions);
+  const cb = $("set-card-actions");
+  if (cb) cb.checked = settings.cardActions;
+}
+function saveSettings() { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); }
+const settingsModal = $("settings-modal");
+$("settings-btn").addEventListener("click", () => {
+  applySettings();
+  settingsModal.hidden = false;
+});
+$("settings-ok").addEventListener("click", () => { settingsModal.hidden = true; });
+settingsModal.addEventListener("click", e => { if (e.target === settingsModal) settingsModal.hidden = true; });
+$("set-card-actions").addEventListener("change", e => {
+  settings.cardActions = e.target.checked;
+  applySettings(); saveSettings();
+});
+loadSettings();
+
 /* ---------- 导出 / 导入 ---------- */
 $("export-btn").addEventListener("click", () => {
   const data = {
@@ -790,6 +858,7 @@ async function reloadFolders() {
 /* 切换到指定任务夹并重新加载其任务（避免串夹显示错误数据） */
 async function selectFolder(id) {
   if (activeFolderId === id && blocks.some(b => b.folderId === id)) return;
+  clearSelection();
   activeFolderId = id;
   saveScroll();
   await reloadTasks();
@@ -810,6 +879,21 @@ async function reloadTasks() {
     await Promise.all(jobs);
   }
 }
+
+/* ---------- 选中 / 复制快捷键 ---------- */
+canvas.addEventListener("click", e => {
+  if (!e.target.closest(".block")) clearSelection();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { clearSelection(); return; }
+  if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
+    const ae = document.activeElement;
+    if (ae && (ae.isContentEditable || ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+    if (selectedBlockId == null) return;
+    e.preventDefault();
+    copySelectedBlock();
+  }
+});
 
 /* ---------- 启动 ---------- */
 async function boot() {

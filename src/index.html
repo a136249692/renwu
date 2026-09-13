@@ -29,6 +29,7 @@
         <div class="side-foot">
           <button id="export-btn">导出</button>
           <button id="import-btn">导入</button>
+          <button id="settings-btn" title="设置">⚙</button>
         </div>
       </aside>
 
@@ -70,6 +71,21 @@
         <div class="modal-actions">
           <button id="modal-cancel">取消</button>
           <button class="primary" id="modal-ok">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div class="modal-overlay" id="settings-modal" hidden>
+      <div class="modal">
+        <h3>设置</h3>
+        <label class="setting-row">
+          <span class="setting-label">常驻显示卡片操作按钮<br /><small>开启后，每张卡片的「完成」「删除」按钮始终可见</small></span>
+          <input type="checkbox" id="set-card-actions" class="switch" />
+          <span class="switch-track" aria-hidden="true"></span>
+        </label>
+        <div class="modal-actions">
+          <button class="primary" id="settings-ok">完成</button>
         </div>
       </div>
     </div>

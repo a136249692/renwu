@@ -152,6 +152,7 @@ body.is-dragging .bg::after { opacity: 0; }
   box-shadow: var(--sh-xs);
 }
 .side-foot button:hover { color: var(--text); background: rgba(255,255,255,0.92); box-shadow: var(--sh-sm); }
+.side-foot #settings-btn { flex: none; width: 38px; font-size: 14px; padding: 8px 0; }
 
 /* ---------- 画布区 ---------- */
 .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -296,6 +297,9 @@ body.is-dragging .bg::after { opacity: 0; }
   opacity: 1; background: var(--accent); border-color: transparent;
   box-shadow: 0 2px 8px rgba(59, 110, 245, 0.38);
 }
+/* 设置开启：常驻显示卡片操作按钮 */
+body.show-card-actions .block-check,
+body.show-card-actions .block-del { opacity: 1; }
 
 .block-del {
   position: absolute; top: 9px; right: 33px; width: 19px; height: 19px; border-radius: 6px;
@@ -310,6 +314,10 @@ body.is-dragging .bg::after { opacity: 0; }
   box-shadow: var(--sh-md), 0 0 0 3px var(--accent-soft);
   border-color: var(--accent-line);
   background: rgba(255,255,255,0.96);
+}
+.block.selected:not(.editing) {
+  border-color: var(--accent-line);
+  box-shadow: var(--sh-md), 0 0 0 3px var(--accent-soft);
 }
 
 /* ---------- 对齐辅助线 ---------- */
@@ -389,6 +397,28 @@ body.is-dragging .bg::after { opacity: 0; }
 .modal-actions .primary:hover { background: var(--accent-deep); box-shadow: 0 4px 12px rgba(59, 110, 245, 0.38); }
 
 .hidden { display: none !important; }
+
+/* ---------- 设置开关 ---------- */
+.setting-row {
+  display: flex; align-items: center; gap: 12px; cursor: pointer;
+  padding: 4px 2px;
+}
+.setting-label { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text); }
+.setting-label small { display: block; font-size: 11px; color: var(--faint); margin-top: 3px; font-weight: 400; }
+.switch {
+  -webkit-appearance: none; appearance: none; position: absolute; width: 0; height: 0; opacity: 0; margin: 0;
+}
+.switch-track {
+  flex: none; width: 40px; height: 24px; border-radius: 999px;
+  background: rgba(28,31,38,0.18); position: relative; transition: background 0.2s var(--ease);
+}
+.switch-track::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; box-shadow: var(--sh-xs);
+  transition: transform 0.2s var(--ease);
+}
+.switch:checked + .switch-track { background: var(--accent); }
+.switch:checked + .switch-track::after { transform: translateX(16px); }
 
 /* ---------- 轻量提示 toast ---------- */
 #app-toast {
