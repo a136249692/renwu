@@ -25,6 +25,17 @@ pub struct Task {
     pub sort_order: i64,
     pub x: f64,
     pub y: f64,
+    pub calendar_date: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct TaskHistory {
+    pub id: i64,
+    pub task_id: i64,
+    pub old_content: String,
+    pub new_content: String,
+    pub change_type: String,
+    pub changed_at: i64,
 }
 
 pub fn init_db(db_path: &std::path::Path) -> Connection {
@@ -46,7 +57,16 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             is_completed INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             sort_order INTEGER DEFAULT 0,
-            updated_at INTEGER
+            updated_at INTEGER,
+            calendar_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS task_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            old_content TEXT NOT NULL,
+            new_content TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            changed_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_tasks_folder ON tasks(folder_id, is_completed, sort_order);",
     )
@@ -68,6 +88,27 @@ fn migrate(conn: &Connection) {
         )
         .expect("Failed to migrate tasks (x/y)");
     }
+    let has_cal = conn
+        .prepare("SELECT calendar_date FROM tasks LIMIT 0")
+        .map(|_| true)
+        .unwrap_or(false);
+    if !has_cal {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN calendar_date TEXT;",
+        )
+        .expect("Failed to migrate tasks (calendar_date)");
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS task_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id INTEGER NOT NULL,
+            old_content TEXT NOT NULL,
+            new_content TEXT NOT NULL,
+            change_type TEXT NOT NULL,
+            changed_at INTEGER NOT NULL
+        );",
+    )
+    .expect("Failed to create task_history");
 }
 
 // ---------- Folders ----------
@@ -143,7 +184,7 @@ pub fn delete_folder(conn: &Connection, id: i64) -> Result<(), String> {
 pub fn list_tasks(conn: &Connection, folder_id: i64) -> Result<Vec<Task>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, folder_id, content, is_completed, created_at, sort_order, x, y
+            "SELECT id, folder_id, content, is_completed, created_at, sort_order, x, y, calendar_date
              FROM tasks WHERE folder_id = ?1
              ORDER BY is_completed ASC, sort_order ASC, created_at ASC, id ASC",
         )
@@ -159,6 +200,7 @@ pub fn list_tasks(conn: &Connection, folder_id: i64) -> Result<Vec<Task>, String
                 sort_order: row.get(5)?,
                 x: row.get(6)?,
                 y: row.get(7)?,
+                calendar_date: row.get(8)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -208,6 +250,7 @@ pub fn create_task(
         sort_order,
         x,
         y,
+        calendar_date: None,
     })
 }
 
@@ -256,6 +299,13 @@ pub fn toggle_task(conn: &Connection, id: i64, is_completed: bool) -> Result<Tas
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|e| e.to_string())?;
+    let calendar_date: Option<String> = conn
+        .query_row(
+            "SELECT calendar_date FROM tasks WHERE id = ?1",
+            rusqlite::params![id],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     Ok(Task {
         id,
         folder_id,
@@ -265,6 +315,7 @@ pub fn toggle_task(conn: &Connection, id: i64, is_completed: bool) -> Result<Tas
         sort_order,
         x,
         y,
+        calendar_date,
     })
 }
 
@@ -297,6 +348,88 @@ pub fn delete_task(conn: &Connection, id: i64) -> Result<(), String> {
     conn.execute("DELETE FROM tasks WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 获取所有设置了 calendar_date 的任务
+pub fn list_calendar_tasks(conn: &Connection) -> Result<Vec<Task>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, folder_id, content, is_completed, created_at, sort_order, x, y, calendar_date
+             FROM tasks WHERE calendar_date IS NOT NULL
+             ORDER BY calendar_date ASC, created_at ASC, id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let tasks = stmt
+        .query_map([], |row| {
+            Ok(Task {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                content: row.get(2)?,
+                is_completed: row.get::<_, i64>(3)? != 0,
+                created_at: row.get(4)?,
+                sort_order: row.get(5)?,
+                x: row.get(6)?,
+                y: row.get(7)?,
+                calendar_date: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(tasks)
+}
+
+/// 设置任务的日历日期
+pub fn set_calendar_date(conn: &Connection, id: i64, date_str: Option<&str>) -> Result<(), String> {
+    conn.execute(
+        "UPDATE tasks SET calendar_date = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![date_str, now_millis(), id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 保存任务变更历史
+pub fn save_task_history(
+    conn: &Connection,
+    task_id: i64,
+    old_content: &str,
+    new_content: &str,
+    change_type: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO task_history (task_id, old_content, new_content, change_type, changed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![task_id, old_content, new_content, change_type, now_millis()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 获取任务的变更历史
+pub fn list_task_history(conn: &Connection, task_id: i64) -> Result<Vec<TaskHistory>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, task_id, old_content, new_content, change_type, changed_at
+             FROM task_history WHERE task_id = ?1
+             ORDER BY changed_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let history = stmt
+        .query_map([task_id], |row| {
+            Ok(TaskHistory {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                old_content: row.get(2)?,
+                new_content: row.get(3)?,
+                change_type: row.get(4)?,
+                changed_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(history)
 }
 
 pub fn now_millis() -> i64 {

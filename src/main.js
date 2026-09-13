@@ -13,6 +13,7 @@ function detectTauri() {
   return !!(t && (t.core || t.invoke));
 }
 const isTauri = detectTauri;
+const STICKY_FOLDER = "便利贴";
 
 /* ---------- IPC 健康跟踪 ----------
  * invoke 失败时仍返回 null（api 方法用 if(result) 判空，null 自动回退 localStorage），
@@ -178,6 +179,7 @@ function mapTask(t) {
     y: t.y || 0,
     row: !!t.is_completed,
     w: 0,
+    calendarDate: t.calendar_date || null,
   };
 }
 
@@ -280,6 +282,40 @@ const api = {
     if (!isTauri()) return null;
     return invoke("open_data_dir");
   },
+  /* 日历日期设置 */
+  async setCalendarDate(id, dateStr) {
+    if (isTauri()) return invoke("set_calendar_date", { id, dateStr });
+    const d = lsLoadAll();
+    const t = (d.tasks || []).find(x => x.id === id);
+    if (t) t.calendar_date = dateStr || null;
+    lsSaveAll(d);
+  },
+  /* 获取日历任务（所有任务夹中设置了 calendar_date 的任务） */
+  async getCalendarTasks() {
+    if (isTauri()) {
+      const list = await invoke("get_calendar_tasks");
+      if (list) return list.map(mapTask);
+    }
+    const d = lsLoadAll();
+    return (d.tasks || []).filter(t => t.calendar_date).map(mapTask);
+  },
+  /* 获取任务变更历史 */
+  async getTaskHistory(taskId) {
+    if (isTauri()) {
+      const list = await invoke("get_task_history", { taskId });
+      if (list) return list;
+    }
+    const d = lsLoadAll();
+    return (d.history || []).filter(h => h.task_id === taskId).sort((a, b) => b.changed_at - a.changed_at);
+  },
+  /* 保存任务变更历史 */
+  async saveTaskHistory(taskId, oldContent, newContent, changeType) {
+    if (isTauri()) return invoke("save_task_history", { taskId, oldContent, newContent, changeType });
+    const d = lsLoadAll();
+    d.history = d.history || [];
+    d.history.push({ task_id: taskId, old_content: oldContent, new_content: newContent, change_type: changeType, changed_at: Date.now() });
+    lsSaveAll(d);
+  },
 };
 
 /* ---------- 分界线位置（localStorage，纯前端偏好） ---------- */
@@ -321,6 +357,22 @@ const folderListEl = $("folder-list");
 const folderTitle = $("folder-title");
 const folderMeta = $("folder-meta");
 const boardEmpty = $("board-empty");
+const calWrap = $("cal-wrap");
+const calGrid = $("cal-grid");
+const calTitle = $("cal-title");
+const stickyPopup = $("sticky-popup");
+const stickyInput = $("sticky-input");
+const historyPanel = $("history-panel");
+const historyContent = $("history-content");
+
+/* ---------- 日历状态 ---------- */
+let calMode = false;
+let calYear = new Date().getFullYear();
+let calMonth = new Date().getMonth();
+let calTasks = [];
+
+/* ---------- 便利贴状态 ---------- */
+let stickyFolderId = null;
 
 /* ---------- 工具 ---------- */
 function fmtTime(ts) {
@@ -330,6 +382,26 @@ function fmtTime(ts) {
 }
 function escapeHtml(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+/* ---------- 日期工具 ---------- */
+function dateKey(d) {
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+function todayKey() { return dateKey(new Date()); }
+function parseDateKey(s) {
+  if (!s) return null;
+  const [y, m, d] = s.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d);
+}
+function fmtDateShort(s) {
+  const d = parseDateKey(s);
+  if (!d) return "";
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+function isStickyFolder(f) {
+  return f.name === STICKY_FOLDER;
 }
 
 /* ---------- 分界线 ---------- */
@@ -361,17 +433,20 @@ function persistAllDonePositions() {
 function renderFolders() {
   folderListEl.innerHTML = "";
   folders.forEach(f => {
+    const locked = isStickyFolder(f);
     const li = document.createElement("li");
-    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "");
-    li.innerHTML = `<span class="ico">📁</span><span class="name"></span><button class="rm" title="删除任务夹">×</button>`;
+    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "") + (locked ? " locked" : "");
+    li.innerHTML = `<span class="ico">📁</span><span class="name"></span>${locked ? '<span class="lock-icon">🔒</span>' : ''}<button class="rm" title="删除任务夹">×</button>`;
     li.querySelector(".name").textContent = f.name;
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm")) return;
       selectFolder(f.id);
     });
-    li.querySelector(".rm").addEventListener("click", e => {
-      e.stopPropagation(); removeFolder(f.id);
-    });
+    if (!locked) {
+      li.querySelector(".rm").addEventListener("click", e => {
+        e.stopPropagation(); removeFolder(f.id);
+      });
+    }
     li.addEventListener("dblclick", e => {
       if (!e.target.classList.contains("rm")) openModal("rename", f);
     });
@@ -554,6 +629,7 @@ function makeBlock(b) {
   });
   title.addEventListener("blur", () => {
     const txt = getTitleText(title);
+    const oldContent = title.dataset.oldContent || b.title;
     // 空白内容块不保存：直接删除该块（含后端记录）
     if (!txt.trim()) {
       el.classList.remove("editing");
@@ -567,6 +643,10 @@ function makeBlock(b) {
     title.contentEditable = "false";
     el.classList.remove("editing");
     api.updateContent(b.id, final);
+    // 记录变更历史
+    if (oldContent !== final) {
+      api.saveTaskHistory(b.id, oldContent, final, "edit");
+    }
     mirrorNow();
     autoSize(el, b, title);
   });
@@ -637,6 +717,7 @@ function autoSize(el, b, title) {
 /* ---------- 编辑态 ---------- */
 function startEdit(el, b) {
   const title = el.querySelector(".block-title");
+  title.dataset.oldContent = b.title;
   el.classList.add("editing");
   title.contentEditable = "true";
   title.focus();
@@ -669,8 +750,10 @@ function startDrag(e, el, b) {
   if (e.target.closest(".block-check") || e.target.closest(".block-del")) return;
   if (e.button !== 0) return;
 
+  // 编辑态下不启动拖动，允许用户自由选择文本
   const title = el.querySelector(".block-title");
-  const wasEditing = title.contentEditable === "true";
+  if (title && title.contentEditable === "true") return;
+  if (el.classList.contains("editing")) return;
   const DRAG_THRESHOLD = 4;
   const originX = e.clientX, originY = e.clientY;
   let started = false;
@@ -683,7 +766,6 @@ function startDrag(e, el, b) {
 
   function beginDrag() {
     started = true;
-    if (wasEditing) { try { title.blur(); } catch (_) {} }
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     startLeft = b.x; startTop = b.y;
     curX = startLeft; curY = startTop;
@@ -784,6 +866,8 @@ function startDrag(e, el, b) {
         // 待完成区域内拖动 → 只更新坐标
         api.moveTask(b.id, b.x, b.y);
         encodePos(el, b);
+        // 重叠合并检测：拖到其他块上方时合并内容
+        checkAndMerge(b, el);
       }
       mirrorNow();
     }
@@ -807,6 +891,60 @@ function snapFlat(nx, ny, xLines, yLines) {
     if (d < bestY) { bestY = d; sy = yLines[i]; gy = yLines[i]; }
   }
   return { x: sx, y: sy, gx: gx, gy: gy };
+}
+
+/* ---------- 重叠合并 ---------- */
+function checkAndMerge(b, el) {
+  const curRect = { x: b.x, y: b.y, w: el.offsetWidth, h: el.offsetHeight };
+  let target = null, targetEl = null;
+  for (const o of blocks) {
+    if (o.id === b.id) continue;
+    const oEl = board.querySelector(`.block[data-id="${o.id}"]`);
+    if (!oEl) continue;
+    const oRect = { x: o.x, y: o.y, w: oEl.offsetWidth, h: oEl.offsetHeight };
+    // 重叠面积 > 50% 视为合并
+    const ox = Math.max(0, Math.min(curRect.x + curRect.w, oRect.x + oRect.w) - Math.max(curRect.x, oRect.x));
+    const oy = Math.max(0, Math.min(curRect.y + curRect.h, oRect.y + oRect.h) - Math.max(curRect.y, oRect.y));
+    const overlapArea = ox * oy;
+    const selfArea = curRect.w * curRect.h;
+    if (overlapArea / selfArea > 0.5) { target = o; targetEl = oEl; break; }
+  }
+  if (!target) return;
+  // 显示合并提示
+  showMergeHint(el);
+  // 合并内容
+  const merged = (b.title + "\n" + target.title).trim();
+  const oldTitle = target.title;
+  api.updateContent(target.id, merged);
+  target.title = merged;
+  // 记录变更历史
+  if (b.calendarDate || target.calendarDate) {
+    api.saveTaskHistory(target.id, oldTitle, merged, "merge");
+  }
+  // 更新目标块 DOM 内容
+  const targetTitleEl = targetEl.querySelector(".block-title");
+  if (targetTitleEl) {
+    targetTitleEl.textContent = merged;
+    autoSize(targetEl, target, targetTitleEl);
+  }
+  // 删除被合并的块
+  b.done = false;
+  blocks = blocks.filter(x => x.id !== b.id);
+  api.deleteTask(b.id);
+  el.remove();
+  if (b.id === selectedBlockId) clearSelection();
+  relayout(false);
+  mirrorNow();
+}
+
+function showMergeHint(el) {
+  const hint = document.createElement("div");
+  hint.className = "merge-hint";
+  hint.textContent = "已合并内容";
+  hint.style.left = (el.offsetLeft + el.offsetWidth / 2 - 40) + "px";
+  hint.style.top = (el.offsetTop - 24) + "px";
+  board.appendChild(hint);
+  setTimeout(() => hint.remove(), 1200);
 }
 
 /* ---------- 任务操作 ---------- */
@@ -869,6 +1007,7 @@ function removeBlock(id) {
 async function removeFolder(id) {
   const f = folders.find(x => x.id === id);
   if (!f) return;
+  if (isStickyFolder(f)) { alert("便利贴任务夹不可删除"); return; }
   if (!confirm(`确定删除任务夹「${f.name}」及其全部任务？`)) return;
   await api.deleteFolder(id);
   folders = folders.filter(x => x.id !== id);
@@ -1109,7 +1248,7 @@ canvas.addEventListener("click", e => {
   if (!e.target.closest(".block")) clearSelection();
 });
 document.addEventListener("keydown", e => {
-  if (e.key === "Escape") { clearSelection(); return; }
+  if (e.key === "Escape") { clearSelection(); closeStickyPopup(); return; }
   if ((e.ctrlKey || e.metaKey) && (e.key === "c" || e.key === "C")) {
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
@@ -1117,7 +1256,252 @@ document.addEventListener("keydown", e => {
     e.preventDefault();
     copySelectedBlock();
   }
+  if ((e.ctrlKey || e.metaKey) && (e.key === "q" || e.key === "Q")) {
+    e.preventDefault();
+    toggleStickyPopup();
+  }
 });
+
+/* ---------- 便利贴弹窗 ---------- */
+function toggleStickyPopup() {
+  if (stickyPopup.hidden) showStickyPopup();
+  else closeStickyPopup();
+}
+function showStickyPopup() {
+  const rect = canvas.getBoundingClientRect();
+  stickyPopup.style.left = (window.innerWidth / 2 - 150) + "px";
+  stickyPopup.style.top = (window.innerHeight / 2 - 100) + "px";
+  stickyPopup.hidden = false;
+  stickyInput.value = "";
+  stickyInput.focus();
+}
+function closeStickyPopup() {
+  stickyPopup.hidden = true;
+  stickyInput.value = "";
+}
+async function saveStickyNote() {
+  const text = stickyInput.value.trim();
+  if (!text) { closeStickyPopup(); return; }
+  let fid = stickyFolderId;
+  if (!fid || !folders.find(f => f.id === fid)) {
+    fid = await ensureStickyFolder();
+  }
+  const nb = await api.createTask(fid, text, 16, 100);
+  if (activeFolderId === fid) blocks.push(nb);
+  closeStickyPopup();
+  flashSave();
+  mirrorNow();
+}
+
+/* ---------- 日历 ---------- */
+function toggleCalendar() {
+  calMode = !calMode;
+  const toggle = $("cal-toggle");
+  if (calMode) {
+    toggle.classList.add("active");
+    canvas.hidden = true;
+    calWrap.hidden = false;
+    renderCalendar();
+  } else {
+    toggle.classList.remove("active");
+    canvas.hidden = false;
+    calWrap.hidden = true;
+    renderAll();
+  }
+}
+async function renderCalendar() {
+  calTasks = await api.getCalendarTasks();
+  const calD = new Date(calYear, calMonth, 1);
+  calTitle.textContent = `${calYear}年${calMonth + 1}月`;
+  const firstDay = calD.getDay();
+  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
+  const daysInPrev = new Date(calYear, calMonth, 0).getDate();
+  const tKey = todayKey();
+  let html = '<div class="cal-weekdays">';
+  ["日", "一", "二", "三", "四", "五", "六"].forEach(d => { html += `<span>${d}</span>`; });
+  html += '</div><div class="cal-weeks">';
+  const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
+  for (let i = 0; i < totalCells; i++) {
+    let dNum, monthCls = "", cellYear, cellMonth;
+    if (i < firstDay) {
+      dNum = daysInPrev - firstDay + i + 1;
+      monthCls = " other-month";
+      cellMonth = calMonth - 1;
+      cellYear = cellMonth < 0 ? calYear - 1 : calYear;
+      if (cellMonth < 0) cellMonth = 11;
+    } else if (i - firstDay >= daysInMonth) {
+      dNum = i - firstDay - daysInMonth + 1;
+      monthCls = " other-month";
+      cellMonth = calMonth + 1;
+      cellYear = cellMonth > 11 ? calYear + 1 : calYear;
+      if (cellMonth > 11) cellMonth = 0;
+    } else {
+      dNum = i - firstDay + 1;
+      cellYear = calYear;
+      cellMonth = calMonth;
+    }
+    const dStr = dateKey(new Date(cellYear, cellMonth, dNum));
+    const isToday = dStr === tKey;
+    const dayTasks = calTasks.filter(t => t.calendarDate === dStr);
+    const wk = Math.floor(i / 7);
+    html += `<div class="cal-cell${monthCls}${isToday ? " today" : ""}" data-date="${dStr}" draggable="false">`;
+    html += `<div class="day-num">${dNum}</div>`;
+    html += '<div class="cal-tasks">';
+    for (const t of dayTasks) {
+      const done = t.done ? " done" : "";
+      html += `<div class="cal-task${done}" draggable="true" data-id="${t.id}" data-date="${t.calendarDate}">`;
+      html += `<span class="cal-task-check">${t.done ? "✓" : ""}</span>`;
+      html += `<span class="cal-task-text">${escapeHtml(t.title)}</span>`;
+      html += `<button class="cal-task-del" data-id="${t.id}">×</button>`;
+      html += "</div>";
+    }
+    html += "</div>";
+    html += `<button class="cal-cell-add" data-date="${dStr}">＋</button>`;
+    html += "</div>";
+  }
+  html += "</div>";
+  calGrid.innerHTML = html;
+  // 事件绑定
+  calGrid.querySelectorAll(".cal-cell-add").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      const dateStr = e.target.dataset.date;
+      const nb = await api.createTask(activeFolderId, "", 16, 100);
+      await api.setCalendarDate(nb.id, dateStr);
+      nb.calendarDate = dateStr;
+      calTasks.push(nb);
+      renderCalendar();
+    });
+  });
+  calGrid.querySelectorAll(".cal-task-del").forEach(btn => {
+    btn.addEventListener("click", async e => {
+      e.stopPropagation();
+      const id = Number(btn.dataset.id);
+      await api.deleteTask(id);
+      calTasks = calTasks.filter(t => t.id !== id);
+      renderCalendar();
+    });
+  });
+  // 日历任务拖动
+  let dragTask = null;
+  calGrid.querySelectorAll(".cal-task").forEach(t => {
+    t.addEventListener("dragstart", e => {
+      dragTask = t;
+      t.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", t.dataset.id);
+    });
+    t.addEventListener("dragend", () => { t.classList.remove("dragging"); dragTask = null; });
+    t.addEventListener("dblclick", async e => {
+      const id = Number(t.dataset.id);
+      const task = calTasks.find(x => x.id === id);
+      if (!task) return;
+      const newText = prompt("编辑任务内容：", task.title);
+      if (newText !== null && newText !== task.title) {
+        const oldText = task.title;
+        await api.updateContent(id, newText);
+        task.title = newText;
+        api.saveTaskHistory(id, oldText, newText, "edit");
+        renderCalendar();
+      }
+    });
+  });
+  calGrid.querySelectorAll(".cal-cell").forEach(cell => {
+    cell.addEventListener("dragover", e => { e.preventDefault(); cell.classList.add("drag-over"); });
+    cell.addEventListener("dragleave", () => { cell.classList.remove("drag-over"); });
+    cell.addEventListener("drop", async e => {
+      e.preventDefault();
+      cell.classList.remove("drag-over");
+      const id = Number(e.dataTransfer.getData("text/plain"));
+      const dateStr = cell.dataset.date;
+      const task = calTasks.find(t => t.id === id);
+      if (!task || task.calendarDate === dateStr) return;
+      const oldDate = task.calendarDate;
+      await api.setCalendarDate(id, dateStr);
+      task.calendarDate = dateStr;
+      api.saveTaskHistory(id, `${oldDate} 任务`, `${dateStr} 任务`, "move");
+      renderCalendar();
+    });
+  });
+}
+
+/* ---------- 变更历史面板 ---------- */
+function showHistoryPanel() {
+  historyPanel.hidden = false;
+  loadHistory();
+}
+function closeHistoryPanel() {
+  historyPanel.hidden = true;
+}
+async function loadHistory() {
+  const entries = [];
+  for (const b of blocks) {
+    const h = await api.getTaskHistory(b.id);
+    for (const e of h) entries.push({ ...e, taskId: b.id, taskTitle: b.title });
+  }
+  // 也加载日历任务的历史
+  for (const t of calTasks) {
+    const h = await api.getTaskHistory(t.id);
+    for (const e of h) entries.push({ ...e, taskId: t.id, taskTitle: t.title });
+  }
+  if (!entries.length) {
+    historyContent.innerHTML = '<div class="history-empty">暂无变更记录</div>';
+    return;
+  }
+  entries.sort((a, b) => (b.changed_at || 0) - (a.changed_at || 0));
+  historyContent.innerHTML = entries.map(e => {
+    const typeLabel = { edit: "编辑", merge: "合并", move: "移动" }[e.change_type] || e.change_type;
+    const d = new Date(e.changed_at);
+    const timeStr = `${d.getMonth() + 1}/${d.getDate()} ${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
+    return `<div class="history-item">
+      <div class="hist-time">${timeStr}</div>
+      <div class="hist-type">${typeLabel} · ${escapeHtml(e.taskTitle || "")}</div>
+      <div class="hist-diff">
+        <div class="hist-old">${escapeHtml(e.old_content || "")}</div>
+        <div class="hist-new">${escapeHtml(e.new_content || "")}</div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/* ---------- 确保便利贴任务夹存在 ---------- */
+async function ensureStickyFolder() {
+  const existing = folders.find(f => isStickyFolder(f));
+  if (existing) { stickyFolderId = existing.id; return existing.id; }
+  const nf = await api.createFolder(STICKY_FOLDER);
+  folders.push(nf);
+  stickyFolderId = nf.id;
+  return nf.id;
+}
+
+/* ---------- 事件绑定 ---------- */
+function bindCalendarEvents() {
+  $("cal-toggle").addEventListener("click", toggleCalendar);
+  $("cal-prev").addEventListener("click", () => {
+    calMonth--; if (calMonth < 0) { calMonth = 11; calYear--; }
+    renderCalendar();
+  });
+  $("cal-next").addEventListener("click", () => {
+    calMonth++; if (calMonth > 11) { calMonth = 0; calYear++; }
+    renderCalendar();
+  });
+  $("cal-today").addEventListener("click", () => {
+    calYear = new Date().getFullYear();
+    calMonth = new Date().getMonth();
+    renderCalendar();
+  });
+  $("history-btn").addEventListener("click", showHistoryPanel);
+}
+function bindStickyEvents() {
+  $("sticky-save").addEventListener("click", saveStickyNote);
+  $("sticky-cancel").addEventListener("click", closeStickyPopup);
+  stickyInput.addEventListener("keydown", e => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveStickyNote(); }
+    if (e.key === "Escape") { e.stopPropagation(); closeStickyPopup(); }
+  });
+}
+function bindHistoryEvents() {
+  $("history-close").addEventListener("click", closeHistoryPanel);
+}
 
 /* ---------- 启动 ---------- */
 async function boot() {
@@ -1138,8 +1522,15 @@ async function boot() {
     await migrateOrphansToSqlite();
   }
   await reloadFolders();
+  await ensureStickyFolder();
   await reloadTasks();
   await restoreFromMirror();
   renderAll();
+  // 绑定日历和便利贴按钮
+  bindCalendarEvents();
+  bindStickyEvents();
+  bindHistoryEvents();
+  // 初始日历
+  renderCalendar();
 }
 boot();

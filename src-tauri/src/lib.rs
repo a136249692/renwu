@@ -28,7 +28,11 @@ pub fn run() {
             reorder_tasks,
             delete_task,
             storage_info,
-            open_data_dir
+            open_data_dir,
+            get_calendar_tasks,
+            set_calendar_date,
+            get_task_history,
+            save_task_history
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -144,4 +148,34 @@ fn reorder_tasks(state: DbState, ids: Vec<i64>) -> Result<(), String> {
 fn delete_task(state: DbState, id: i64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::delete_task(&conn, id)
+}
+
+#[tauri::command]
+fn get_calendar_tasks(state: DbState) -> Result<Vec<db::Task>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_calendar_tasks(&conn)
+}
+
+#[tauri::command]
+fn set_calendar_date(state: DbState, id: i64, date_str: Option<String>) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::set_calendar_date(&conn, id, date_str.as_deref())
+}
+
+#[tauri::command]
+fn get_task_history(state: DbState, task_id: i64) -> Result<Vec<db::TaskHistory>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_task_history(&conn, task_id)
+}
+
+#[tauri::command]
+fn save_task_history(
+    state: DbState,
+    task_id: i64,
+    old_content: String,
+    new_content: String,
+    change_type: String,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::save_task_history(&conn, task_id, &old_content, &new_content, &change_type)
 }
