@@ -68,7 +68,7 @@ jobs:
           updaterJsonPreferNsis: true
 
   upload-to-cnb:
-    name: Upload artifacts to CNB
+    name: Upload artifacts to CNB and mirror latest.json
     runs-on: ubuntu-latest
     needs: build-and-release
     if: ${{ always() && needs.build-and-release.result == 'success' }}
@@ -76,22 +76,29 @@ jobs:
       CNB_TOKEN: ${{ secrets.CNB_TOKEN }}
       CNB_API_ENDPOINT: https://api.cnb.cool
       CNB_REPO_SLUG: shiyishi-2026/surenwu
+      GH_REPO: a136249692/renwu
     steps:
-      - name: Download release assets
+      - name: Download release assets from GitHub
         env:
           TAG: ${{ needs.build-and-release.outputs.tag_name }}
           VER: ${{ needs.build-and-release.outputs.version }}
         run: |
           set -euo pipefail
-          BASE="https://github.com/a136249692/renwu/releases/download/${TAG}"
-          for f in "latest.json" "TaskManager_${VER}_x64-setup.exe" "TaskManager_${VER}_x64-setup.exe.sig"; do
+          BASE="https://github.com/${GH_REPO}/releases/download/${TAG}"
+          for f in \
+            "latest.json" \
+            "TaskManager_${VER}_x64-setup.exe" \
+            "TaskManager_${VER}_x64-setup.exe.sig" \
+            "TaskManager_${VER}_x64_en-US.msi" \
+            "TaskManager_${VER}_x64_en-US.msi.sig"; do
             echo "Downloading ${f}"
-            curl -fSL -o "$f" "${BASE}/${f}"
+            curl -fSL --retry 3 -o "$f" "${BASE}/${f}"
             test -s "$f"
           done
         shell: bash
 
       - name: Upload to CNB release via official plugin
+        continue-on-error: true
         env:
           TAG: ${{ needs.build-and-release.outputs.tag_name }}
         run: |
@@ -101,8 +108,61 @@ jobs:
             -e CNB_API_ENDPOINT="${CNB_API_ENDPOINT}" \
             -e CNB_REPO_SLUG="${CNB_REPO_SLUG}" \
             -e PLUGIN_TAG="${TAG}" \
-            -e PLUGIN_ATTACHMENTS='./latest.json,./TaskManager_*.exe,./TaskManager_*.exe.sig' \
+            -e PLUGIN_ATTACHMENTS='./latest.json,./TaskManager_*.exe,./TaskManager_*.exe.sig,./TaskManager_*.msi,./TaskManager_*.msi.sig' \
             -v "$(pwd):$(pwd)" \
             -w "$(pwd)" \
             cnbcool/attachments:latest
+        shell: bash
+
+      - name: Verify CNB uploads (anonymous)
+        env:
+          TAG: ${{ needs.build-and-release.outputs.tag_name }}
+          VER: ${{ needs.build-and-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          CNB_BASE="https://cnb.cool/${CNB_REPO_SLUG}/-/releases/download/${TAG}"
+          for f in \
+            "latest.json" \
+            "TaskManager_${VER}_x64-setup.exe" \
+            "TaskManager_${VER}_x64-setup.exe.sig" \
+            "TaskManager_${VER}_x64_en-US.msi" \
+            "TaskManager_${VER}_x64_en-US.msi.sig"; do
+            code=$(curl -sS --http1.1 -o /dev/null -w "%{http_code}" "${CNB_BASE}/${f}")
+            echo "${f} -> HTTP ${code}"
+            if [ "${code}" != "200" ] && [ "${code}" != "302" ] && [ "${code}" != "301" ]; then
+              echo "Missing asset on CNB: ${f}"
+              exit 1
+            fi
+          done
+        shell: bash
+
+      - name: Rewrite latest.json URLs to CNB and overwrite GitHub release asset
+        env:
+          TAG: ${{ needs.build-and-release.outputs.tag_name }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          GH_BASE="https://github.com/${GH_REPO}/releases/download/${TAG}"
+          CNB_BASE="https://cnb.cool/${CNB_REPO_SLUG}/-/releases/download/${TAG}"
+
+          echo "--- original (from tauri-action) ---"
+          cat latest.json
+          echo ""
+
+          echo "Rewriting GitHub URLs -> CNB URLs..."
+          cp latest.json gh-latest.original.json
+          sed -i "s|${GH_BASE}|${CNB_BASE}|g" latest.json
+          mv latest.json cnb-latest.json
+          echo "--- rewritten cnb-latest.json ---"
+          cat cnb-latest.json
+          echo ""
+
+          echo "Overwriting GitHub release asset latest.json..."
+          /usr/bin/gh release upload "${TAG}" cnb-latest.json --repo "${GH_REPO}" --clobber --filename latest.json
+          echo "Done. GitHub release latest.json now points to CNB."
+
+          echo ""
+          echo "--- verify by downloading from GitHub ---"
+          curl -fSL --retry 3 -o verify.json "https://github.com/${GH_REPO}/releases/download/${TAG}/latest.json"
+          grep -q "${CNB_BASE}" verify.json && echo "OK: GitHub latest.json now references CNB" || { echo "FAIL: CNB URL not found in GitHub latest.json"; exit 1; }
         shell: bash
