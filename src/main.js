@@ -131,10 +131,41 @@ const DIVIDER_KEY = "glassCanvas.dividers";
 const SCROLL_KEY = "glassCanvas.scroll";
 const DONE_SORT_KEY = "glassCanvas.doneSort";
 const DEFAULT_FOLDER_KEY = "glassCanvas.defaultFolder";
+const FOLDER_ORDER_KEY = "glassCanvas.folderOrder";
+
+/* ---------- 应用标题（用户偏好，用于左上角品牌名 + 窗口标题） ---------- */
+const APP_TITLE_KEY = "glassCanvas.appTitle";
+const APP_TITLE_DEFAULT = "玻光画布";
+const APP_TITLE_MAX = 20;
+function getAppTitle() {
+  try {
+    const v = localStorage.getItem(APP_TITLE_KEY);
+    return v ? v.trim() : APP_TITLE_DEFAULT;
+  } catch { return APP_TITLE_DEFAULT; }
+}
+function setAppTitle(v) {
+  const s = String(v || "").trim().slice(0, APP_TITLE_MAX) || APP_TITLE_DEFAULT;
+  try { localStorage.setItem(APP_TITLE_KEY, s); } catch {}
+  return s;
+}
+
+/* ---------- 任务夹顺序 ----------
+   拖动排序后持久化到 localStorage。key 为文件夹 id，value 为索引。
+   新增的文件夹若不在 map 中，会自动追加到末尾。 */
+function getFolderOrderMap() {
+  try { return JSON.parse(localStorage.getItem(FOLDER_ORDER_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveFolderOrderMap(map) {
+  try { localStorage.setItem(FOLDER_ORDER_KEY, JSON.stringify(map)); } catch {}
+}
 
 /* ---------- 默认任务夹 ---------- */
 function getDefaultFolderId() {
-  try { return localStorage.getItem(DEFAULT_FOLDER_KEY); } catch { return null; }
+  try {
+    const v = localStorage.getItem(DEFAULT_FOLDER_KEY);
+    return v == null || v === "" ? null : Number(v);
+  } catch { return null; }
 }
 function setDefaultFolderId(id) {
   try { localStorage.setItem(DEFAULT_FOLDER_KEY, String(id)); } catch {}
@@ -175,6 +206,21 @@ function nextMockId() {
     mockId.n = m + 1;
   } catch { mockId.n = (mockId.n || 0) + 1; }
   return mockId.n;
+}
+
+/* ---------- 便利贴内容解析 ----------
+ * 便利贴夹的块内容使用 "### 标题\n\n正文" 约定（分隔符：### + 空格 + 标题 + 空行）。
+ * 普通任务夹不会出现此约定，故不影响其他文件夹。 */
+function parseStickyContent(raw) {
+  const text = String(raw || "");
+  const m = text.match(/^\s*###\s+(.+?)(?:\n\n|\n(?=\S)|\s*$)([\s\S]*)$/);
+  if (!m) return { title: "", body: text };
+  return { title: m[1].trim(), body: m[2].replace(/^\s+/, "") };
+}
+function composeStickyContent(title, body) {
+  title = String(title || "").trim();
+  body = String(body || "");
+  return title ? `### ${title}\n\n${body}` : body;
 }
 
 /* ---------- 统一数据映射：后端 snake_case → 前端 block 对象 ---------- */
@@ -343,13 +389,50 @@ const guideH = $("guide-h");
 const folderListEl = $("folder-list");
 const folderTitle = $("folder-title");
 const folderMeta = $("folder-meta");
+const brandTitleEl = $("brand-title");
 const alignToggle = $("align-toggle");
 const boardEmpty = $("board-empty");
 const stickyPopup = $("sticky-popup");
 const stickyInput = $("sticky-input");
+const stickyTitle = $("sticky-title");
+const stickyHeader = $("sticky-header");
+const folderTitleSticky = $("folder-title-sticky");
+const stickyCount = $("sticky-count");
+const stickySearchInput = $("sticky-search-input");
+const stickySearchClear = $("sticky-search-clear");
+const viewWallBtn = $("view-wall");
+const viewListBtn = $("view-list");
+const stickyAddBtn = $("sticky-add");
 
 /* ---------- 速记夹状态 ---------- */
 let stickyFolderId = null;
+/* ---------- 便利贴视图状态 ---------- */
+let stickyViewMode = "wall";   // "wall" | "list"
+let stickyQuery = "";          // 搜索关键词
+const STICKY_VIEW_KEY = "glassCanvas.stickyViewMode";
+try {
+  const saved = localStorage.getItem(STICKY_VIEW_KEY);
+  if (saved === "list" || saved === "wall") stickyViewMode = saved;
+} catch {}
+/* 便签颜色循环（墙模式下按 index 轮询，视觉上更活泼） */
+const STICKY_COLORS = [
+  "#fff9c4", /* 黄 */
+  "#ffd8bf", /* 橘 */
+  "#c8f4d6", /* 绿 */
+  "#c5e1ff", /* 蓝 */
+  "#e8d5ff", /* 紫 */
+  "#ffd1e3", /* 粉 */
+];
+/* 便签旋转角度（按 id 稳定派生，±3deg） */
+function stickyRotation(id) {
+  const seed = String(id || 0).split("").reduce((a, c) => a + (c.charCodeAt(0) || 0), 0);
+  return ((seed % 15) - 7) * 0.4;  // -2.8 ~ +2.8 度
+}
+
+/* ---------- 文件夹拖动排序状态 ---------- */
+let _dragFolderId = null;   // 正在拖动的文件夹 id
+let _dragLastX = null;      // 拖拽最后一次的鼠标 X 坐标（用于决定插入到目标之前/之后）
+let _dragLastY = null;      // 拖拽最后一次的鼠标 Y 坐标
 
 /* ---------- 工具 ---------- */
 function fmtTime(ts) {
@@ -362,6 +445,12 @@ function escapeHtml(s) {
 }
 function isStickyFolder(f) {
   return f.name === STICKY_FOLDER || f.name === "便利贴";
+}
+/* 当前 activeFolder 是否是便利贴夹（速记夹） */
+function isStickyFolderActive() {
+  if (!activeFolderId) return false;
+  const f = folders.find(x => x.id === activeFolderId);
+  return !!f && isStickyFolder(f);
 }
 
 /* ---------- 分界线 ----------
@@ -464,21 +553,36 @@ function restorePendingBlocks() {
 /* ---------- 渲染侧栏 ---------- */
 function renderFolders() {
   folderListEl.innerHTML = "";
-  const sorted = [...folders].sort((a, b) => {
-    const aSticky = isStickyFolder(a) ? 0 : 1;
-    const bSticky = isStickyFolder(b) ? 0 : 1;
-    return aSticky - bSticky;
+  // 排序：先按「非速记夹」的手动顺序（持久化在 FOLDER_ORDER_KEY），
+  // 没有手动顺序的按 folders 数组顺序追加；速记夹永远排最前。
+  const orderMap = getFolderOrderMap();
+  const normal = folders.filter(f => !isStickyFolder(f));
+  const sticky = folders.filter(f => isStickyFolder(f));
+  normal.sort((a, b) => {
+    const oa = orderMap[String(a.id)];
+    const ob = orderMap[String(b.id)];
+    // 有手动顺序的优先按顺序；没有的按 id（近似创建顺序）排
+    if (oa !== undefined && ob !== undefined) return oa - ob;
+    if (oa !== undefined) return -1;
+    if (ob !== undefined) return 1;
+    return (a.id || 0) - (b.id || 0);
   });
+  const sorted = [...sticky, ...normal];
   const defId = getDefaultFolderId();
   sorted.forEach(f => {
     const locked = isStickyFolder(f);
     const isDefault = f.id === defId;
     const li = document.createElement("li");
-    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "") + (locked ? " locked" : "");
+    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "") + (locked ? " locked" : "") + (locked ? "" : " draggable");
+    li.dataset.id = f.id;
+    if (!locked) li.setAttribute("draggable", "true");
     const starHtml = isDefault
-      ? '<span class="default-star" title="默认任务夹">★</span>'
+      ? '<span class="default-badge" title="默认任务夹：每次打开应用都会先显示此夹">默认</span>'
       : '<button class="star-btn" title="设为默认任务夹">☆</button>';
-    li.innerHTML = `<span class="ico">📁</span><span class="name"></span>${starHtml}${locked ? '<span class="lock-icon">🔒</span>' : ''}<button class="rm" title="删除任务夹">×</button>`;
+    const handleHtml = locked
+      ? '<span class="drag-handle" title="固定位置，不可拖动">⋮⋮</span>'
+      : '<span class="drag-handle" title="拖动可调整位置">⋮⋮</span>';
+    li.innerHTML = `${handleHtml}<span class="ico">📁</span><span class="name"></span>${starHtml}${locked ? '<span class="lock-icon">🔒</span>' : ''}<button class="rm" title="删除任务夹">×</button>`;
     li.querySelector(".name").textContent = f.name;
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
@@ -502,17 +606,110 @@ function renderFolders() {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
       openModal("rename", f);
     });
+    // 拖动排序：只有非速记夹可以拖动
+    if (!locked) {
+      li.addEventListener("dragstart", e => {
+        if (e.target.closest(".rm") || e.target.closest(".star-btn")) { e.preventDefault(); return; }
+        _dragFolderId = f.id;
+        _dragLastX = e.clientX;
+        _dragLastY = e.clientY;
+        li.classList.add("dragging");
+        folderListEl.classList.add("reordering");
+        try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(f.id)); } catch (_) {}
+      });
+      li.addEventListener("dragend", () => {
+        li.classList.remove("dragging");
+        folderListEl.classList.remove("reordering");
+        folderListEl.querySelectorAll(".drag-over").forEach(x => x.classList.remove("drag-over"));
+        _dragFolderId = null;
+        _dragLastX = null;
+        _dragLastY = null;
+      });
+      li.addEventListener("dragover", e => {
+        if (_dragFolderId === null) return;
+        e.preventDefault();
+        _dragLastX = e.clientX;
+        _dragLastY = e.clientY;
+        if (li.dataset.id !== String(_dragFolderId)) li.classList.add("drag-over");
+        else li.classList.remove("drag-over");
+      });
+      li.addEventListener("dragleave", () => {
+        li.classList.remove("drag-over");
+      });
+      li.addEventListener("drop", e => {
+        e.preventDefault();
+        li.classList.remove("drag-over");
+        if (_dragFolderId === null) return;
+        const targetId = Number(li.dataset.id);
+        if (targetId === _dragFolderId) return;
+        reorderFolders(_dragFolderId, targetId);
+      });
+    }
     folderListEl.appendChild(li);
   });
+}
+
+/* 拖动文件夹到目标文件夹位置：把源元素插到目标之前/之后。
+   以鼠标落点相对目标元素的中线决定插入到目标之前还是之后；
+   自动适配纵向列表（用 Y）和移动端横向列表（用 X）。 */
+function reorderFolders(srcId, targetId) {
+  const srcIdx = folders.findIndex(f => f.id === srcId);
+  const tgtIdx = folders.findIndex(f => f.id === targetId);
+  if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+  const src = folders.splice(srcIdx, 1)[0];
+  // 移除 src 后目标位置可能左移一位；重新定位
+  let insertAt = folders.findIndex(f => f.id === targetId);
+  if (insertAt < 0) { folders.splice(srcIdx, 0, src); return; }
+  const tgtEl = folderListEl.querySelector(`li[data-id="${targetId}"]`);
+  if (tgtEl) {
+    const r = tgtEl.getBoundingClientRect();
+    // 检测列表布局方向（自适应移动端横向布局）
+    const isVertical = getComputedStyle(folderListEl).flexDirection !== "row";
+    const pastMid = isVertical
+      ? (_dragLastY != null && _dragLastY > r.top + r.height / 2)
+      : (_dragLastX != null && _dragLastX > r.left + r.width / 2);
+    if (pastMid) insertAt = insertAt + 1;
+  }
+  folders.splice(insertAt, 0, src);
+  // 持久化顺序（只记录非速记夹）
+  const map = {};
+  folders.forEach((f, i) => { if (!isStickyFolder(f)) map[String(f.id)] = i; });
+  saveFolderOrderMap(map);
+  renderFolders();
 }
 
 /* ---------- 渲染画布（协调式：新增才建，多余才删） ---------- */
 function renderAll() {
   renderFolders();
   const f = folders.find(x => x.id === activeFolderId);
-  if (!f) { folderTitle.textContent = "请选择任务夹"; return; }
+  if (!f) {
+    folderTitle.textContent = "请选择任务夹";
+    stickyHeader.hidden = true;
+    $("stage-header").hidden = false;
+    return;
+  }
   folderTitle.textContent = f.name;
 
+  const isSticky = isStickyFolderActive();
+  /* 便利贴夹：切到专用 header，隐藏画布分界线和普通提示 */
+  $("stage-header").hidden = isSticky;
+  stickyHeader.hidden = !isSticky;
+  if (isSticky) {
+    folderTitleSticky.textContent = f.name;
+    divider.hidden = true;
+    $("done-hint").hidden = true;
+    guideV.hidden = true;
+    guideH.hidden = true;
+    /* 清空普通任务的「待完成 X」标签 */
+    const pLabel = $("pending-label");
+    const tLabel = $("done-label");
+    if (pLabel) pLabel.textContent = "";
+    if (tLabel) tLabel.textContent = "";
+    alignToggle.parentElement.hidden = true;
+  } else {
+    divider.hidden = false;
+    alignToggle.parentElement.hidden = false;
+  }
   const existing = new Map();
   [...board.querySelectorAll(".block")].forEach(el => existing.set(Number(el.dataset.id), el));
   blocks.forEach(b => {
@@ -522,8 +719,128 @@ function renderAll() {
   });
   existing.forEach(el => el.remove()); // 清掉多余节点
 
-  relayout(false);
-  restoreScroll();
+  if (isSticky) {
+    applyStickyLayout();
+    applyStickySearch();
+    renderStickyHeader();
+  } else {
+    relayout(false);
+    restoreScroll();
+    /* 恢复 board-empty 的默认文案（避免从便利贴夹切回时显示便签文案） */
+    boardEmpty.classList.remove("search-empty");
+    if (blocks.length === 0) {
+      boardEmpty.hidden = false;
+      boardEmpty.innerHTML =
+        '<b>双击空白处</b> 即可输入任务<br />输入完成后，把块拖到任意位置摆放<br />拖到分界线上方即为「已完成」，下方为「待完成」';
+    } else {
+      boardEmpty.hidden = true;
+    }
+  }
+}
+
+/* ═══════════════════════════════════════════════════ *
+ *  便利贴墙：布局、搜索、header 状态
+ * ═══════════════════════════════════════════════════ */
+
+/* 决定一个块是否被搜索关键词命中（标题 / 正文，忽略大小写） */
+function stickyMatches(el, q) {
+  if (!q) return true;
+  const text = ((el.__parsedTitle || "") + " " + (el.__parsedBody || "")).toLowerCase();
+  return text.includes(q);
+}
+
+/* 按关键词过滤 + 高亮命中片段；返回命中数量 */
+function applyStickySearch() {
+  const q = String(stickyQuery || "").trim().toLowerCase();
+  const blocks_els = [...board.querySelectorAll(".block.sticky")];
+  let hit = 0;
+  for (const el of blocks_els) {
+    const body = el.querySelector(".block-title");
+    const st = el.querySelector(".sticky-title");
+    const matched = stickyMatches(el, q);
+    if (!matched) {
+      el.classList.add("sticky-hidden");
+    } else {
+      el.classList.remove("sticky-hidden");
+      hit++;
+      if (body) renderHighlight(body, el.__parsedBody || "", q);
+      if (st) renderHighlight(st, el.__parsedTitle || "", q);
+    }
+  }
+  const empty = boardEmpty;
+  if (empty) {
+    const isEmpty = blocks.length === 0;
+    const noHit = q && hit === 0;
+    if (isEmpty) {
+      empty.hidden = false;
+      empty.classList.remove("search-empty");
+      empty.innerHTML = '<b>按 Ctrl+Q</b> 或点击右上「＋」<br />新建一张便签';
+    } else if (noHit) {
+      empty.hidden = false;
+      empty.classList.add("search-empty");
+      empty.innerHTML = `未找到与「<b>${escapeHtml(q)}</b>」相关的便签`;
+    } else {
+      empty.hidden = true;
+      empty.classList.remove("search-empty");
+    }
+  }
+  return hit;
+}
+
+/* 高亮渲染：把 text 里匹配 q 的片段用 <mark> 包起来。
+ * 用 innerHTML 写入，但对原文做过 escape，故不会引入 HTML 注入。 */
+function renderHighlight(el, text, q) {
+  if (!el) return;
+  text = String(text || "");
+  if (!q) { el.innerHTML = escapeHtml(text); return; }
+  const idx = text.toLowerCase().indexOf(q);
+  if (idx < 0) { el.innerHTML = escapeHtml(text); return; }
+  const before = escapeHtml(text.slice(0, idx));
+  const mid = escapeHtml(text.slice(idx, idx + q.length));
+  const after = escapeHtml(text.slice(idx + q.length));
+  el.innerHTML = `${before}<mark>${mid}</mark>${after}`;
+}
+
+/* 应用「墙 / 列表」视图。墙模式下用 CSS Grid + 便签色 + 旋转；列表模式下单列纵向。 */
+function applyStickyLayout() {
+  board.classList.toggle("sticky-wall", stickyViewMode === "wall");
+  board.classList.toggle("sticky-list", stickyViewMode === "list");
+  const blocks_els = [...board.querySelectorAll(".block.sticky")];
+  blocks_els.forEach((el, i) => {
+    if (stickyViewMode === "wall") {
+      el.style.setProperty("--sticky-bg", STICKY_COLORS[i % STICKY_COLORS.length]);
+      el.style.setProperty("--rot", stickyRotation(el.dataset.id) + "deg");
+    } else {
+      el.style.setProperty("--sticky-bg", "#fff");
+      el.style.setProperty("--rot", "0deg");
+    }
+    el.style.top = "";
+    el.style.left = "";
+  });
+  board.style.height = "auto";
+}
+
+/* 更新便利贴 header 的计数 / 视图按钮 / 搜索清空按钮可见性 */
+function renderStickyHeader() {
+  const total = blocks.length;
+  const q = String(stickyQuery || "").trim();
+  let hit = total;
+  if (q) {
+    hit = [...board.querySelectorAll(".block.sticky")].filter(el =>
+      !el.classList.contains("sticky-hidden")
+    ).length;
+  }
+  if (stickyCount) {
+    stickyCount.textContent = q ? `${hit} / ${total} 便签` : `${total} 便签`;
+  }
+  if (stickySearchClear) stickySearchClear.hidden = !q;
+  if (viewWallBtn && viewListBtn) {
+    const wall = stickyViewMode === "wall";
+    viewWallBtn.setAttribute("aria-selected", String(wall));
+    viewListBtn.setAttribute("aria-selected", String(!wall));
+    viewWallBtn.classList.toggle("active", wall);
+    viewListBtn.classList.toggle("active", !wall);
+  }
 }
 
 /* 定位一个已存在的块元素 */
@@ -703,9 +1020,20 @@ function makeBlock(b) {
   el.dataset.id = b.id;
   el.__b = b;
 
+  /* 便利贴夹：解析 "### 标题\n\n正文" 约定。
+   * 标题走独立 .sticky-title 元素（不可编辑），正文走原 .block-title（可编辑）。
+   * 编辑时只编辑正文；标题保持不变。普通文件夹不解析。 */
+  const inSticky = isStickyFolderActive();
+  const parsed = inSticky ? parseStickyContent(b.title) : { title: "", body: b.title || "" };
+  if (inSticky) {
+    el.classList.add("sticky", "no-row");
+    el.__parsedTitle = parsed.title;
+    el.__parsedBody = parsed.body;
+  }
+
   const title = document.createElement("div");
   title.className = "block-title";
-  title.textContent = b.title;
+  title.textContent = parsed.body;
   title.contentEditable = "false";
   title.spellcheck = false;
 
@@ -729,7 +1057,20 @@ function makeBlock(b) {
     removeBlock(b.id);
   });
 
-  el.append(title, meta, check, del);
+  if (inSticky) {
+    /* 便利贴夹：无完成/未完成概念，隐藏勾选；有标题时置顶 */
+    check.remove();
+    if (parsed.title) {
+      const st = document.createElement("div");
+      st.className = "sticky-title";
+      st.textContent = parsed.title;
+      st.title = "标题";
+      el.appendChild(st);
+    }
+    el.append(title, meta, del);
+  } else {
+    el.append(title, meta, check, del);
+  }
 
   el.addEventListener("dblclick", e => {
     if (e.target === check || e.target === del) return;
@@ -737,16 +1078,22 @@ function makeBlock(b) {
   });
   title.addEventListener("input", () => {
     const txt = getTitleText(title);
-    b.title = txt;
+    /* 便利贴夹：input 时把 body 与解析出的标题重新拼合（### 标题\n\n正文），
+     * 保持 b.title 为完整原文；同时写库。普通夹：b.title = 纯文本。 */
+    if (el.classList.contains("sticky")) {
+      b.title = composeStickyContent(el.__parsedTitle || "", txt);
+    } else {
+      b.title = txt;
+    }
     flashSave();
-    api.updateContent(b.id, txt);
+    api.updateContent(b.id, b.title);
     mirrorNow();
     autoSize(el, b, title);
   });
   title.addEventListener("blur", () => {
     const txt = getTitleText(title);
     const oldContent = title.dataset.oldContent || b.title;
-    // 空白内容块不保存：直接删除该块（含后端记录）
+    /* 空白内容块不保存：直接删除该块（含后端记录） */
     if (!txt.trim()) {
       const hadContent = (oldContent || "").trim().length > 0;
       if (hadContent && !confirm("内容块已被清空，确定删除？此操作不可撤销。")) {
@@ -761,13 +1108,16 @@ function makeBlock(b) {
       removeBlock(b.id);
       return;
     }
-    const final = txt;
+    /* 便利贴夹：保留 ### 前缀；普通夹：纯文本 */
+    const final = el.classList.contains("sticky")
+      ? composeStickyContent(el.__parsedTitle || "", txt)
+      : txt;
     b.title = final;
-    title.textContent = final;
+    title.textContent = txt;
     title.contentEditable = "false";
     el.classList.remove("editing");
     api.updateContent(b.id, final);
-    // 记录变更历史
+    /* 记录变更历史 */
     if (oldContent !== final) {
       api.saveTaskHistory(b.id, oldContent, final, "edit");
     }
@@ -853,6 +1203,8 @@ function startEdit(el, b) {
 /* ---------- 双击空白新建 ---------- */
 canvas.addEventListener("dblclick", e => {
   if (e.target.closest(".block")) return;
+  /* 便利贴夹：双击空白不新建便签，避免误触；用户按 Ctrl+Q 或工具栏「+」添加 */
+  if (isStickyFolderActive()) return;
   const rect = board.getBoundingClientRect();
   const clickX = e.clientX - rect.left;
   const clickY = e.clientY - rect.top;
@@ -869,8 +1221,51 @@ canvas.addEventListener("dblclick", e => {
   });
 });
 
+/* ---------- Ctrl+V 直接粘贴到待完成区 ----------
+   粘贴到画布空白处时，跳过「双击 → 空白 → 手动粘贴」流程，
+   直接把剪贴板文本按行拆分成多个任务批量写入。
+   编辑态（块标题内正在输入）由浏览器原生处理，不拦截。
+   便利贴夹下不启用：粘贴便签走 Ctrl+Q 弹窗或工具栏「+」按钮，避免多行粘贴变成一堆便签。 */
+canvas.addEventListener("paste", e => {
+  const active = document.activeElement;
+  if (active && (active.isContentEditable || /^(INPUT|TEXTAREA)$/.test(active.tagName))) return;
+  if (e.target.closest('[contenteditable="true"], input, textarea')) return;
+  if (stickyPopup && !stickyPopup.hidden) return;
+  if (isStickyFolderActive()) return;
+  const text = e.clipboardData && e.clipboardData.getData("text/plain");
+  if (!text || !text.trim()) return;
+  e.preventDefault();
+  createTasksFromPaste(text, e.clientX, e.clientY);
+});
+
+async function createTasksFromPaste(text, clientX, clientY) {
+  const lines = text.split(/\r?\n/).map(s => s.replace(/\s+$/,"")).filter(s => s.trim().length > 0);
+  if (!lines.length) return;
+  const rect = board.getBoundingClientRect();
+  const dy = dividerY();
+  const px = Math.max(16, Math.round(clientX - rect.left));
+  // 若粘贴点在已完成区上方，强制落到待完成区顶端附近，避免覆盖已完成内容
+  let py = Math.round(clientY - rect.top);
+  if (py < dy + 24) py = dy + 24;
+  const GAP = 62; // 估算每行块高度 + 间距
+  const created = [];
+  for (let i = 0; i < lines.length; i++) {
+    const nb = await api.createTask(activeFolderId, lines[i], px, py + i * GAP);
+    blocks.push(nb);
+    created.push(nb);
+  }
+  renderAll();
+  if (alignMode) alignPendingBlocks();
+  mirrorNow();
+  toast(lines.length > 1
+    ? `已从剪贴板添加 ${lines.length} 个任务`
+    : `已从剪贴板添加 1 个任务`);
+}
+
 /* ---------- 拖动 + 磁吸对齐 ---------- */
 function startDrag(e, el, b) {
+  /* 便利贴夹：块由 CSS Grid/Flex 排布，不允许用户拖动 */
+  if (isStickyFolderActive()) return;
   if (e.target.closest(".block-check") || e.target.closest(".block-del")) return;
   if (e.button !== 0) return;
 
@@ -1149,6 +1544,10 @@ async function removeFolder(id) {
     const nf = await api.createFolder("我的任务");
     folders.push(nf); activeFolderId = nf.id;
   }
+  // 清理顺序表中已删除文件夹的残留记录
+  const orderMap = getFolderOrderMap();
+  delete orderMap[String(id)];
+  saveFolderOrderMap(orderMap);
   await reloadTasks();
   renderAll();
 }
@@ -1469,8 +1868,8 @@ async function reloadFolders() {
   }
   if (!activeFolderId || !folders.find(x => x.id === activeFolderId)) {
     const defId = getDefaultFolderId();
-    activeFolderId = (defId && folders.find(x => x.id === Number(defId)))
-      ? Number(defId) : folders[0].id;
+    activeFolderId = (defId && folders.find(x => x.id === defId))
+      ? defId : folders[0].id;
   }
 }
 /* 切换到指定任务夹并重新加载其任务（避免串夹显示错误数据） */
@@ -1491,9 +1890,11 @@ async function selectFolder(id) {
 async function reloadTasks() {
   if (!activeFolderId) { blocks = []; return; }
   blocks = await api.getTasks(activeFolderId);
-  // 迁移旧数据
+  // 迁移旧数据（普通任务夹：块初始位置可能是 (0,0)，需要按栅格摆放）
+  // 便利贴夹不需要位置信息（由 CSS Grid 自动排布），跳过迁移避免多余写入
+  const isSticky = isStickyFolderActive();
   const allZero = blocks.length > 0 && blocks.every(b => b.x === 0 && b.y === 0);
-  if (allZero) {
+  if (allZero && !isSticky) {
     const dy = dividerY();
     const jobs = blocks.map((b, i) => {
       b.x = 20 + (i % 4) * 200;
@@ -1533,31 +1934,34 @@ function showStickyPopup() {
   stickyPopup.style.left = (window.innerWidth / 2 - 150) + "px";
   stickyPopup.style.top = (window.innerHeight / 2 - 100) + "px";
   stickyPopup.hidden = false;
+  stickyTitle.value = "";
   stickyInput.value = "";
-  stickyInput.focus();
+  stickyTitle.focus();
 }
 function closeStickyPopup() {
   stickyPopup.hidden = true;
+  stickyTitle.value = "";
   stickyInput.value = "";
 }
 async function saveStickyNote() {
-  const text = stickyInput.value.trim();
-  if (!text) { closeStickyPopup(); return; }
+  const titleTxt = stickyTitle.value.trim();
+  const bodyTxt = stickyInput.value.trim();
+  /* 标题与正文均可为空，但至少一项需要非空 */
+  if (!titleTxt && !bodyTxt) { closeStickyPopup(); return; }
   let fid = stickyFolderId;
   if (!fid || !folders.find(f => f.id === fid)) {
     fid = await ensureStickyFolder();
   }
-  // 初始位置用中性值 (16, 0)：稍后由 findFreeSpot 重新计算。
-  // 不能用 dividerY() —— 用户在别的文件夹时，当前分界线属于那个文件夹，
-  // 会把便签存到速记夹文件夹里的错误位置，导致切换后与已有便签重叠。
-  const nb = await api.createTask(fid, text, 16, 0);
+  /* 用 "### 标题\n\n正文" 约定写入 content（标题可省略） */
+  const content = composeStickyContent(titleTxt, bodyTxt);
+  /* 初始位置用中性值 (16, 0)：便利贴夹下由 CSS Grid 自动排布，
+   * 不需要像普通任务夹那样依赖 dividerY/findFreeSpot。 */
+  const nb = await api.createTask(fid, content, 16, 0);
 
   const prevFolderId = activeFolderId;
   const needSwitch = prevFolderId !== fid;
 
   if (needSwitch) {
-    // 切到速记夹：reload + render 后 DOM 才有便签块，
-    // findFreeSpot 才能读到 offsetWidth/offsetHeight 做真实尺寸碰撞检测
     saveScroll();
     activeFolderId = fid;
     await reloadTasks();
@@ -1567,23 +1971,8 @@ async function saveStickyNote() {
   }
   renderAll();
 
-  const curDy = dividerY();
-  // 待完成区紧凑排列：按创建时间排序后逐个从分界线下方第一行开始摆放，
-  // 行内由左到右、行间由上到下、间距由上一行最大底部决定（不重叠、不留大空档）
-  const pending = blocks.filter(b => !b.done).sort((a, b) => a.createdAt - b.createdAt);
-  for (const b of pending) {
-    findFreeSpot(b, curDy, true);
-  }
-  for (const b of blocks) {
-    if (b.done) continue;
-    const el = board.querySelector(`.block[data-id="${b.id}"]`);
-    if (el) encodePos(el, b);
-    api.moveTask(b.id, b.x, b.y); // 落盘：刷新后仍是紧凑排列
-  }
-
   if (needSwitch) {
-    // 切回原文件夹：用户本来就在别的任务夹里按的 Ctrl+Q，不该被带过去
-    // 先把速记夹当前的滚动位置落盘，再切换 activeFolderId（同 selectFolder 的顺序要求）
+    /* 切回原文件夹：用户本来就在别的任务夹里按的 Ctrl+Q，不该被带过去 */
     saveScroll();
     activeFolderId = prevFolderId;
     await reloadTasks();
@@ -1611,6 +2000,65 @@ async function ensureStickyFolder() {
   return nf.id;
 }
 
+/* ---------- 应用标题（可自定义） ---------- */
+function applyAppTitle(text) {
+  if (!brandTitleEl) return;
+  brandTitleEl.textContent = text;
+  document.title = text + " · 任务管理";
+}
+function bindBrandTitle() {
+  if (!brandTitleEl || brandTitleEl.__bound) return;
+  brandTitleEl.__bound = true;
+  brandTitleEl.addEventListener("dblclick", e => {
+    e.preventDefault();
+    e.stopPropagation();
+    brandTitleEl.contentEditable = "true";
+    brandTitleEl.spellcheck = false;
+    brandTitleEl.dataset.oldContent = brandTitleEl.textContent;
+    brandTitleEl.classList.add("editing");
+    brandTitleEl.focus();
+    const r = document.createRange();
+    r.selectNodeContents(brandTitleEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  });
+  brandTitleEl.addEventListener("keydown", e => {
+    e.stopPropagation();
+    if (e.key === "Enter") { e.preventDefault(); brandTitleEl.blur(); return; }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      brandTitleEl.textContent = brandTitleEl.dataset.oldContent || APP_TITLE_DEFAULT;
+      brandTitleEl.contentEditable = "false";
+      brandTitleEl.classList.remove("editing");
+      applyAppTitle(brandTitleEl.textContent);
+      brandTitleEl.focus();
+      return;
+    }
+    if (brandTitleEl.textContent.length >= APP_TITLE_MAX &&
+        !e.ctrlKey && !e.metaKey &&
+        !["Backspace", "Delete", "ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) {
+      e.preventDefault();
+    }
+  });
+  brandTitleEl.addEventListener("blur", () => {
+    if (brandTitleEl.contentEditable !== "true") return;
+    const prev = brandTitleEl.dataset.oldContent;
+    let next = brandTitleEl.textContent.replace(/\s+/g, " ").trim().slice(0, APP_TITLE_MAX);
+    if (!next) next = prev || APP_TITLE_DEFAULT;
+    brandTitleEl.contentEditable = "false";
+    brandTitleEl.classList.remove("editing");
+    if (next !== prev) {
+      const saved = setAppTitle(next);
+      applyAppTitle(saved);
+      toast(`应用名称已改为「${saved}」`);
+    } else {
+      applyAppTitle(next);
+    }
+    delete brandTitleEl.dataset.oldContent;
+  });
+}
+
 /* ---------- 事件绑定 ---------- */
 function bindStickyEvents() {
   $("sticky-save").addEventListener("click", saveStickyNote);
@@ -1619,6 +2067,57 @@ function bindStickyEvents() {
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); saveStickyNote(); }
     if (e.key === "Escape") { e.stopPropagation(); closeStickyPopup(); }
   });
+  /* 标题 Enter 跳到正文；Escape 关闭 */
+  if (stickyTitle) {
+    stickyTitle.addEventListener("keydown", e => {
+      if (e.key === "Enter") { e.preventDefault(); stickyInput.focus(); return; }
+      if (e.key === "Escape") { e.stopPropagation(); closeStickyPopup(); }
+    });
+  }
+  bindStickyHeaderEvents();
+}
+
+/* 便利贴 header 事件：视图切换 / 搜索 / 新建按钮 */
+function bindStickyHeaderEvents() {
+  if (viewWallBtn && viewListBtn) {
+    const setMode = (m) => {
+      stickyViewMode = m;
+      try { localStorage.setItem(STICKY_VIEW_KEY, m); } catch {}
+      applyStickyLayout();
+      applyStickySearch();
+      renderStickyHeader();
+    };
+    viewWallBtn.addEventListener("click", () => setMode("wall"));
+    viewListBtn.addEventListener("click", () => setMode("list"));
+  }
+  if (stickySearchInput) {
+    stickySearchInput.addEventListener("input", () => {
+      stickyQuery = stickySearchInput.value;
+      applyStickySearch();
+      renderStickyHeader();
+    });
+    stickySearchInput.addEventListener("keydown", e => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        stickySearchInput.value = "";
+        stickyQuery = "";
+        applyStickySearch();
+        renderStickyHeader();
+      }
+    });
+  }
+  if (stickySearchClear) {
+    stickySearchClear.addEventListener("click", () => {
+      stickySearchInput.value = "";
+      stickyQuery = "";
+      applyStickySearch();
+      renderStickyHeader();
+      stickySearchInput.focus();
+    });
+  }
+  if (stickyAddBtn) {
+    stickyAddBtn.addEventListener("click", () => showStickyPopup());
+  }
 }
 
 /* ---------- 启动 ---------- */
@@ -1633,6 +2132,8 @@ async function boot() {
   const mode = isTauri() ? "Tauri / SQLite" : "浏览器 / localStorage";
   console.info("[玻光画布] 运行模式:", mode);
   renderFolders();
+  applyAppTitle(getAppTitle());
+  bindBrandTitle();
   if (isTauri()) {
     try { console.info("[玻光画布] 存储信息:", await invoke("storage_info")); }
     catch (e) { console.error("[玻光画布] 获取存储信息失败", e); }

@@ -20,7 +20,7 @@
         <div class="brand">
           <div class="logo">✦</div>
           <div>
-            <h1>玻光画布</h1>
+            <h1 id="brand-title" class="brand-title" title="双击可重命名">玻光画布</h1>
             <small>自由摆放 · 本地保存</small>
           </div>
         </div>
@@ -37,14 +37,30 @@
       <main class="stage">
         <div class="canvas-wrap glass" id="canvas-wrap">
           <div class="canvas-header">
-            <div class="stage-header">
+            <div class="stage-header" id="stage-header">
               <h2 id="folder-title">我的任务</h2>
               <span class="meta" id="folder-meta"></span>
               <label class="align-toggle" title="勾选后待完成块从上到下靠左对齐，取消后恢复原位">
                 <input type="checkbox" id="align-toggle" />
                 <span>靠左对齐</span>
               </label>
-              <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
+              <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>Ctrl+V</kbd> 直接粘贴 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
+            </div>
+            <div class="sticky-header" id="sticky-header" hidden>
+              <h2 id="folder-title-sticky">速记夹</h2>
+              <span class="meta" id="sticky-count"></span>
+              <div class="sticky-search">
+                <span class="sticky-search-ico">⌕</span>
+                <input id="sticky-search-input" type="search" placeholder="搜索便签…" autocomplete="off" />
+                <button id="sticky-search-clear" title="清空" hidden>×</button>
+              </div>
+              <div class="sticky-actions-header">
+                <div class="mode-switch" role="tablist" aria-label="视图切换">
+                  <button id="view-wall" role="tab" aria-selected="true">🗒 墙</button>
+                  <button id="view-list" role="tab">☰ 列表</button>
+                </div>
+                <button id="sticky-add" class="sticky-add-btn" title="新增便签（Ctrl+Q）">＋</button>
+              </div>
             </div>
           </div>
           <div class="canvas" id="canvas">
@@ -69,8 +85,10 @@
 
     <!-- 速记夹弹窗 -->
     <div class="sticky-popup" id="sticky-popup" hidden>
-      <textarea id="sticky-input" placeholder="输入速记夹内容..."></textarea>
+      <input id="sticky-title" type="text" maxlength="60" placeholder="标题（可选）" autocomplete="off" />
+      <textarea id="sticky-input" placeholder="输入便签内容…"></textarea>
       <div class="sticky-actions">
+        <span class="sticky-hint"><kbd>Ctrl+Enter</kbd> 保存</span>
         <button id="sticky-cancel">取消</button>
         <button class="sticky-save" id="sticky-save">保存</button>
       </div>
