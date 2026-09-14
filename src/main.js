@@ -1477,11 +1477,14 @@ async function reloadFolders() {
 async function selectFolder(id) {
   if (activeFolderId === id && blocks.some(b => b.folderId === id)) return;
   clearSelection();
+  // 必须先保存当前文件夹的滚动位置，再切换 activeFolderId。
+  // saveScroll 内部用 activeFolderId 作为 key，顺序颠倒会把旧文件夹的位置
+  // 覆盖写到新文件夹的记录里，导致切过去仍停在旧文件夹的位置。
+  saveScroll();
   activeFolderId = id;
   alignMode = false;
   savedPositions = {};
   alignToggle.checked = false;
-  saveScroll();
   await reloadTasks();
   renderAll();
 }
@@ -1580,6 +1583,8 @@ async function saveStickyNote() {
 
   if (needSwitch) {
     // 切回原文件夹：用户本来就在别的任务夹里按的 Ctrl+Q，不该被带过去
+    // 先把速记夹当前的滚动位置落盘，再切换 activeFolderId（同 selectFolder 的顺序要求）
+    saveScroll();
     activeFolderId = prevFolderId;
     await reloadTasks();
     renderAll();
