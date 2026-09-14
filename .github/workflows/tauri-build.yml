@@ -160,6 +160,9 @@ jobs:
           echo "Done. GitHub release latest.json now points to CNB."
 
           echo ""
+          echo "Waiting for GitHub CDN to propagate (avoid false FAIL below)..."
+          sleep 10
+
           echo "--- verify by downloading from GitHub ---"
           curl -fSL --retry 3 -o verify.json "https://github.com/${GH_REPO}/releases/download/${TAG}/latest.json"
           grep -q "${CNB_BASE}" verify.json && echo "OK: GitHub latest.json now references CNB" || { echo "FAIL: CNB URL not found in GitHub latest.json"; exit 1; }
