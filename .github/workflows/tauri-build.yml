@@ -97,24 +97,99 @@ jobs:
           done
         shell: bash
 
-      - name: Upload to CNB release via official plugin
-        continue-on-error: true
+      - name: Create CNB tag + release (REST API)
         env:
           TAG: ${{ needs.build-and-release.outputs.tag_name }}
         run: |
           set -euo pipefail
-          docker run --rm \
-            -e CNB_TOKEN="${CNB_TOKEN}" \
-            -e CNB_API_ENDPOINT="${CNB_API_ENDPOINT}" \
-            -e CNB_REPO_SLUG="${CNB_REPO_SLUG}" \
-            -e PLUGIN_TAG="${TAG}" \
-            -e PLUGIN_ATTACHMENTS='./latest.json,./TaskManager_*.exe,./TaskManager_*.exe.sig,./TaskManager_*.msi,./TaskManager_*.msi.sig' \
-            -v "$(pwd):$(pwd)" \
-            -w "$(pwd)" \
-            cnbcool/attachments:latest
+          H1="Authorization: Bearer ${CNB_TOKEN}"
+          H2="Accept: application/json"
+          CT="Content-Type: application/json"
+          API="${CNB_API_ENDPOINT}"
+          REPO="${CNB_REPO_SLUG}"
+
+          # 1. Ensure tag exists (idempotent). CNB requires the tag before a release can exist.
+          code=$(curl -sS --http1.1 -X POST -H "$H1" -H "$H2" -H "$CT" \
+            -o /tmp/tagresp -w "%{http_code}" \
+            "${API}/${REPO}/-/git/tags" \
+            -d "{\"name\":\"${TAG}\",\"target\":\"main\",\"message\":\"${TAG}\"}")
+          echo "create tag ${TAG} -> HTTP ${code}"
+          if [ "${code}" == "201" ]; then
+            echo "tag created"
+          elif [ "${code}" == "200" ] || [ "${code}" == "204" ]; then
+            echo "tag already exists (OK)"
+          else
+            echo "unexpected: $(head -c 300 /tmp/tagresp)"; exit 1
+          fi
+
+          # 2. Ensure release exists for this tag (idempotent).
+          code=$(curl -sS --http1.1 -X POST -H "$H1" -H "$H2" -H "$CT" \
+            -o /tmp/rlresp -w "%{http_code}" \
+            "${API}/${REPO}/-/releases" \
+            -d "{\"tag_name\":\"${TAG}\",\"name\":\"${TAG}\",\"body\":\"Task Manager ${TAG}\",\"draft\":false,\"prerelease\":false,\"make_latest\":\"true\",\"target_commitish\":\"main\"}")
+          echo "create release ${TAG} -> HTTP ${code}"
+          if [ "${code}" == "201" ]; then
+            echo "release created"
+          elif [ "${code}" == "409" ] || [ "${code}" == "400" ]; then
+            echo "release likely exists; will get by tag below."
+          else
+            echo "unexpected: $(head -c 300 /tmp/rlresp)"; exit 1
+          fi
+
+          # 3. Get release id from tag.
+          rid=$(curl -sS --http1.1 -H "$H1" -H "$H2" \
+            "${API}/${REPO}/-/releases/tags/${TAG}" | \
+            python3 -c "import sys,json;print(json.load(sys.stdin).get('id',''))" 2>/dev/null || true)
+          echo "release_id=${rid}"
+          test -n "${rid}" || { echo "FAIL: cannot find CNB release for ${TAG}"; exit 1; }
+          echo "CNB_RELEASE_ID=${rid}" >> "$GITHUB_ENV"
         shell: bash
 
-      - name: Verify CNB uploads (anonymous)
+      - name: Upload assets to CNB release (REST API)
+        env:
+          TAG: ${{ needs.build-and-release.outputs.tag_name }}
+          VER: ${{ needs.build-and-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          H1="Authorization: Bearer ${CNB_TOKEN}"
+          H2="Accept: application/json"
+          CT="Content-Type: application/json"
+          API="${CNB_API_ENDPOINT}"
+          REPO="${CNB_REPO_SLUG}"
+          RID="${CNB_RELEASE_ID}"
+
+          upload_one() {
+            local file="$1"
+            local size sz
+            sz=$(wc -c < "$file")
+            echo "--- uploading ${file} (${sz} bytes) ---"
+            local resp upload_url verify_url
+            resp=$(curl -sS --http1.1 -X POST -H "$H1" -H "$H2" -H "$CT" \
+              "${API}/${REPO}/-/releases/${RID}/asset-upload-url" \
+              -d "{\"asset_name\":\"${file}\",\"size\":${sz},\"overwrite\":true}")
+            upload_url=$(echo "$resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('upload_url',''))" 2>/dev/null || true)
+            verify_url=$(echo "$resp" | python3 -c "import sys,json;print(json.load(sys.stdin).get('verify_url',''))" 2>/dev/null || true)
+            test -n "${upload_url}" || { echo "FAIL: no upload_url from $(echo "$resp" | head -c 200)"; exit 1; }
+            local ucode
+            ucode=$(curl -sS --http1.1 -X PUT -T "$file" -o /tmp/up -w "%{http_code}" "$upload_url")
+            [ "${ucode}" == "200" ] || { echo "FAIL: PUT ${file} HTTP ${ucode}"; exit 1; }
+            local vcode
+            vcode=$(curl -sS --http1.1 -X POST -H "$H1" -H "$H2" -o /tmp/up -w "%{http_code}" "$verify_url")
+            [ "${vcode}" == "200" ] || [ "${vcode}" == "201" ] || { echo "FAIL: verify ${file} HTTP ${vcode}"; exit 1; }
+            echo "OK: ${file}"
+          }
+
+          for f in \
+            "latest.json" \
+            "TaskManager_${VER}_x64-setup.exe" \
+            "TaskManager_${VER}_x64-setup.exe.sig" \
+            "TaskManager_${VER}_x64_en-US.msi" \
+            "TaskManager_${VER}_x64_en-US.msi.sig"; do
+            upload_one "$f"
+          done
+        shell: bash
+
+      - name: Verify CNB uploads (anonymous, follows redirect)
         env:
           TAG: ${{ needs.build-and-release.outputs.tag_name }}
           VER: ${{ needs.build-and-release.outputs.version }}
@@ -127,9 +202,12 @@ jobs:
             "TaskManager_${VER}_x64-setup.exe.sig" \
             "TaskManager_${VER}_x64_en-US.msi" \
             "TaskManager_${VER}_x64_en-US.msi.sig"; do
-            code=$(curl -sS --http1.1 -o /dev/null -w "%{http_code}" "${CNB_BASE}/${f}")
-            echo "${f} -> HTTP ${code}"
-            if [ "${code}" != "200" ] && [ "${code}" != "302" ] && [ "${code}" != "301" ]; then
+            # NOTE: CNB returns 302 even when the underlying asset is missing (cache layer).
+            # So we follow redirects (-L) and require a non-empty body / final 200.
+            code=$(curl -sS --http1.1 -L -o /tmp/verify -w "%{http_code}" "${CNB_BASE}/${f}")
+            sz=$(wc -c < /tmp/verify)
+            echo "${f} -> final HTTP ${code} (${sz}B)"
+            if [ "${code}" != "200" ] || [ "${sz}" = "0" ]; then
               echo "Missing asset on CNB: ${f}"
               exit 1
             fi
