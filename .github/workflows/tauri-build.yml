@@ -150,15 +150,13 @@ jobs:
           echo ""
 
           echo "Rewriting GitHub URLs -> CNB URLs..."
-          cp latest.json gh-latest.original.json
           sed -i "s|${GH_BASE}|${CNB_BASE}|g" latest.json
-          mv latest.json cnb-latest.json
-          echo "--- rewritten cnb-latest.json ---"
-          cat cnb-latest.json
+          echo "--- rewritten latest.json ---"
+          cat latest.json
           echo ""
 
           echo "Overwriting GitHub release asset latest.json..."
-          /usr/bin/gh release upload "${TAG}" cnb-latest.json --repo "${GH_REPO}" --clobber --filename latest.json
+          /usr/bin/gh release upload "${TAG}" latest.json --repo "${GH_REPO}" --clobber
           echo "Done. GitHub release latest.json now points to CNB."
 
           echo ""
