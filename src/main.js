@@ -14,7 +14,7 @@ function detectTauri() {
   return !!(t && (t.core || t.invoke));
 }
 const isTauri = detectTauri;
-const STICKY_FOLDER = "便利贴";
+const STICKY_FOLDER = "速记夹";
 
 /* ---------- IPC 健康跟踪 ----------
  * invoke 失败时仍返回 null（api 方法用 if(result) 判空，null 自动回退 localStorage），
@@ -329,6 +329,8 @@ let folders = [];
 let blocks = [];
 let activeFolderId = null;
 let saveTimer = null;
+let savedPositions = {};
+let alignMode = false;
 
 /* ---------- DOM 引用 ---------- */
 const $ = id => document.getElementById(id);
@@ -341,11 +343,12 @@ const guideH = $("guide-h");
 const folderListEl = $("folder-list");
 const folderTitle = $("folder-title");
 const folderMeta = $("folder-meta");
+const alignToggle = $("align-toggle");
 const boardEmpty = $("board-empty");
 const stickyPopup = $("sticky-popup");
 const stickyInput = $("sticky-input");
 
-/* ---------- 便利贴状态 ---------- */
+/* ---------- 速记夹状态 ---------- */
 let stickyFolderId = null;
 
 /* ---------- 工具 ---------- */
@@ -358,7 +361,7 @@ function escapeHtml(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
 function isStickyFolder(f) {
-  return f.name === STICKY_FOLDER;
+  return f.name === STICKY_FOLDER || f.name === "便利贴";
 }
 
 /* ---------- 分界线 ----------
@@ -399,6 +402,63 @@ function persistAllDonePositions() {
   for (const b of blocks) {
     if (b.done) persistBlockPosition(b);
   }
+}
+
+/* ---------- 待完成块靠左对齐 / 恢复原位 ---------- */
+function alignPendingBlocks() {
+  const pending = blocks.filter(b => !b.done);
+  if (!pending.length) return;
+  savedPositions = {};
+  pending.forEach(b => { savedPositions[b.id] = { x: b.x, y: b.y }; });
+  pending.sort((a, b) => (a.y || 0) - (b.y || 0));
+  const els = pending.map(b => {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) el.classList.add("align-anim");
+    return el;
+  });
+  const startX = 20;
+  let cursorY = dividerY() + 16;
+  const GAP = 12;
+  pending.forEach((b, i) => {
+    const el = els[i];
+    const h = el ? el.offsetHeight : 48;
+    b.x = startX;
+    b.y = cursorY;
+    b.row = false;
+    if (el) {
+      el.classList.remove("row");
+      encodePos(el, b);
+    }
+    persistBlockPosition(b);
+    cursorY += h + GAP;
+  });
+  let maxY = cursorY + 40;
+  for (const b of blocks) {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    maxY = Math.max(maxY, b.y + (el ? el.offsetHeight : 48) + 40);
+  }
+  board.style.height = Math.max(maxY, canvas.clientHeight - 2) + "px";
+  setTimeout(() => els.forEach(el => el && el.classList.remove("align-anim")), 340);
+}
+
+function restorePendingBlocks() {
+  const els = blocks.filter(b => !b.done && savedPositions[b.id]).map(b => {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) el.classList.add("align-anim");
+    return el;
+  });
+  for (const b of blocks) {
+    if (b.done) continue;
+    const sv = savedPositions[b.id];
+    if (!sv) continue;
+    b.x = sv.x; b.y = sv.y;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (el) encodePos(el, b);
+    persistBlockPosition(b);
+  }
+  savedPositions = {};
+  relayout(false);
+  setTimeout(() => els.forEach(el => el && el.classList.remove("align-anim")), 340);
 }
 
 /* ---------- 渲染侧栏 ---------- */
@@ -663,7 +723,11 @@ function makeBlock(b) {
   del.className = "block-del";
   del.textContent = "×";
   del.title = "删除";
-  del.addEventListener("click", e => { e.stopPropagation(); removeBlock(b.id); });
+  del.addEventListener("click", e => {
+    e.stopPropagation();
+    if (!confirm("确定删除此内容块？此操作不可撤销。")) return;
+    removeBlock(b.id);
+  });
 
   el.append(title, meta, check, del);
 
@@ -684,6 +748,14 @@ function makeBlock(b) {
     const oldContent = title.dataset.oldContent || b.title;
     // 空白内容块不保存：直接删除该块（含后端记录）
     if (!txt.trim()) {
+      const hadContent = (oldContent || "").trim().length > 0;
+      if (hadContent && !confirm("内容块已被清空，确定删除？此操作不可撤销。")) {
+        el.classList.remove("editing");
+        title.contentEditable = "false";
+        title.textContent = oldContent;
+        b.title = oldContent;
+        return;
+      }
       el.classList.remove("editing");
       title.contentEditable = "false";
       removeBlock(b.id);
@@ -965,9 +1037,9 @@ function checkAndMerge(b, el) {
     if (overlapArea / selfArea > 0.5) { target = o; targetEl = oEl; break; }
   }
   if (!target) return;
-  // 显示合并提示
+  const preview = target.title.length > 40 ? target.title.slice(0, 40) + "…" : target.title;
+  if (!confirm(`确定将此任务合并到「${preview}」吗？\n合并后另一块将被删除，内容追加到目标块。`)) return;
   showMergeHint(el);
-  // 合并内容
   const merged = (b.title + "\n" + target.title).trim();
   const oldTitle = target.title;
   api.updateContent(target.id, merged);
@@ -1067,7 +1139,7 @@ function removeBlock(id) {
 async function removeFolder(id) {
   const f = folders.find(x => x.id === id);
   if (!f) return;
-  if (isStickyFolder(f)) { alert("便利贴任务夹不可删除"); return; }
+  if (isStickyFolder(f)) { alert("速记夹不可删除"); return; }
   if (!confirm(`确定删除任务夹「${f.name}」及其全部任务？`)) return;
   await api.deleteFolder(id);
   folders = folders.filter(x => x.id !== id);
@@ -1356,20 +1428,31 @@ $("import-file").addEventListener("change", async e => {
   reader.readAsText(file); e.target.value = "";
 });
 
-/* ---------- 滚动位置记忆 ---------- */
+/* ---------- 滚动位置记忆 ----------
+   按任务夹 ID 独立记住离开时的滚动位置；找不到记录时回到 (0,0)，
+   避免沿用上一个任务夹的 y 值被浏览器 clamp 到新任务夹底部。 */
+function _scrollMap() {
+  try { return JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}"); }
+  catch { return {}; }
+}
 function saveScroll() {
+  if (activeFolderId == null) return;
   try {
-    const map = JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}");
-    map[activeFolderId] = { x: canvas.scrollLeft, y: canvas.scrollTop };
+    const map = _scrollMap();
+    map[String(activeFolderId)] = { x: canvas.scrollLeft, y: canvas.scrollTop };
     localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
   } catch {}
 }
 function restoreScroll() {
+  if (activeFolderId == null) return;
   try {
-    const map = JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}");
-    const s = map[activeFolderId];
-    if (s) { canvas.scrollLeft = s.x || 0; canvas.scrollTop = s.y || 0; }
-  } catch {}
+    const map = _scrollMap();
+    const s = map[String(activeFolderId)] || { x: 0, y: 0 };
+    canvas.scrollLeft = s.x || 0;
+    canvas.scrollTop = s.y || 0;
+  } catch {
+    canvas.scrollLeft = 0; canvas.scrollTop = 0;
+  }
 }
 canvas.addEventListener("scroll", () => {
   clearTimeout(canvas._t);
@@ -1395,6 +1478,9 @@ async function selectFolder(id) {
   if (activeFolderId === id && blocks.some(b => b.folderId === id)) return;
   clearSelection();
   activeFolderId = id;
+  alignMode = false;
+  savedPositions = {};
+  alignToggle.checked = false;
   saveScroll();
   await reloadTasks();
   renderAll();
@@ -1434,7 +1520,7 @@ document.addEventListener("keydown", e => {
   }
 });
 
-/* ---------- 便利贴弹窗 ---------- */
+/* ---------- 速记夹弹窗 ---------- */
 function toggleStickyPopup() {
   if (stickyPopup.hidden) showStickyPopup();
   else closeStickyPopup();
@@ -1460,14 +1546,14 @@ async function saveStickyNote() {
   }
   // 初始位置用中性值 (16, 0)：稍后由 findFreeSpot 重新计算。
   // 不能用 dividerY() —— 用户在别的文件夹时，当前分界线属于那个文件夹，
-  // 会把便签存到便利贴文件夹里的错误位置，导致切换后与已有便签重叠。
+  // 会把便签存到速记夹文件夹里的错误位置，导致切换后与已有便签重叠。
   const nb = await api.createTask(fid, text, 16, 0);
 
   const prevFolderId = activeFolderId;
   const needSwitch = prevFolderId !== fid;
 
   if (needSwitch) {
-    // 切到便利贴文件夹：reload + render 后 DOM 才有便签块，
+    // 切到速记夹：reload + render 后 DOM 才有便签块，
     // findFreeSpot 才能读到 offsetWidth/offsetHeight 做真实尺寸碰撞检测
     saveScroll();
     activeFolderId = fid;
@@ -1503,10 +1589,17 @@ async function saveStickyNote() {
   mirrorNow();
 }
 
-/* ---------- 确保便利贴任务夹存在 ---------- */
+/* ---------- 确保速记夹存在 ---------- */
 async function ensureStickyFolder() {
   const existing = folders.find(f => isStickyFolder(f));
-  if (existing) { stickyFolderId = existing.id; return existing.id; }
+  if (existing) {
+    if (existing.name !== STICKY_FOLDER) {
+      await api.renameFolder(existing.id, STICKY_FOLDER);
+      existing.name = STICKY_FOLDER;
+    }
+    stickyFolderId = existing.id;
+    return existing.id;
+  }
   const nf = await api.createFolder(STICKY_FOLDER);
   folders.push(nf);
   stickyFolderId = nf.id;
@@ -1546,8 +1639,13 @@ async function boot() {
   await reloadTasks();
   await restoreFromMirror();
   renderAll();
-  // 绑定便利贴按钮
+  // 绑定速记夹按钮
   bindStickyEvents();
+  alignToggle.addEventListener("change", () => {
+    alignMode = alignToggle.checked;
+    if (alignMode) alignPendingBlocks();
+    else restorePendingBlocks();
+  });
   // 冷启动检查更新：延后 1.5s，避免与初始化抢带宽；用户关掉自动检查则跳过
   if (isTauri() && localStorage.getItem(UPDATE_AUTO_KEY) !== "0") {
     setTimeout(() => checkForUpdates(true), 1500);

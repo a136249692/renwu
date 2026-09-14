@@ -40,6 +40,10 @@
             <div class="stage-header">
               <h2 id="folder-title">我的任务</h2>
               <span class="meta" id="folder-meta"></span>
+              <label class="align-toggle" title="勾选后待完成块从上到下靠左对齐，取消后恢复原位">
+                <input type="checkbox" id="align-toggle" />
+                <span>靠左对齐</span>
+              </label>
               <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
             </div>
           </div>
@@ -63,9 +67,9 @@
       </main>
     </div>
 
-    <!-- 便利贴弹窗 -->
+    <!-- 速记夹弹窗 -->
     <div class="sticky-popup" id="sticky-popup" hidden>
-      <textarea id="sticky-input" placeholder="输入便利贴内容..."></textarea>
+      <textarea id="sticky-input" placeholder="输入速记夹内容..."></textarea>
       <div class="sticky-actions">
         <button id="sticky-cancel">取消</button>
         <button class="sticky-save" id="sticky-save">保存</button>

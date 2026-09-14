@@ -179,6 +179,13 @@ body.is-dragging .bg::after { opacity: 0; }
 .stage-header { display: flex; align-items: baseline; gap: 10px; }
 .stage-header h2 { font-size: 22px; font-weight: 680; letter-spacing: -0.03em; color: var(--text-strong); }
 .stage-header .meta { font-size: 12px; color: var(--faint); letter-spacing: 0; }
+.stage-header .align-toggle {
+  display: flex; align-items: center; gap: 4px;
+  font-size: 12px; color: var(--muted); cursor: pointer;
+  user-select: none; white-space: nowrap;
+}
+.stage-header .align-toggle input { margin: 0; cursor: pointer; width: 14px; height: 14px; }
+.stage-header .align-toggle:has(input:checked) { color: var(--accent); }
 .stage-header .hint {
   margin-left: auto; font-size: 11.5px; color: var(--faint);
   display: flex; align-items: center; gap: 6px; letter-spacing: 0;
@@ -284,6 +291,7 @@ body.is-dragging .bg::after { opacity: 0; }
 }
 .block.row .block-title { flex: 1; }
 .block.row .block-meta { margin-top: 0; }
+.block.align-anim { transition: left 0.28s var(--ease), top 0.28s var(--ease); }
 
 .block-title {
   font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap;
@@ -497,7 +505,7 @@ body.show-card-actions .block-del { opacity: 1; }
 }
 body { cursor: var(--cursor-arrow); }
 
-/* ═══ 便利贴弹窗 ═══ */
+/* ═══ 速记夹弹窗 ═══ */
 .sticky-popup {
   position: fixed; z-index: 70; width: 320px; min-height: 200px;
   background: #fff9c4; border-radius: 4px; box-shadow: 0 8px 32px rgba(0,0,0,0.18);
