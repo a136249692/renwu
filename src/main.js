@@ -1957,16 +1957,9 @@ function startDrag(e, el, b) {
     raf = null;
     if (!latestEv) return;
     const ev = latestEv;
-    // 探测当前光标下是否落在侧栏某个任务夹上（用于跨夹移动的视觉反馈）
-    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
-    const li = hit && hit.closest ? hit.closest(".folder-item") : null;
-    if (li !== _sidebarDropTarget) {
-      if (_sidebarDropTarget) _sidebarDropTarget.classList.remove("block-move-target");
-      if (li) li.classList.add("block-move-target");
-      _sidebarDropTarget = li;
-    }
-    // 跨夹移动时不再更新块的 transform，视觉上让块跟随光标由 cursor:grabbing 暗示
-    if (li) return;
+    // 跨夹移动中：不更新块 transform，视觉由 cursor:grabbing 暗示
+    // （探测逻辑已同步到 onMove，避免 raf 被取消导致最后一次探测丢失）
+    if (_sidebarDropTarget) return;
     let nx = startLeft + (ev.clientX - originX);
     let ny = startTop + (ev.clientY - originY);
     // 拖动时不做网格磁吸（避免粘滞感），仅保留淡弱的边缘对齐
@@ -1994,6 +1987,17 @@ function startDrag(e, el, b) {
       if (Math.hypot(ev.clientX - originX, ev.clientY - originY) < DRAG_THRESHOLD) return;
       beginDrag();
     }
+    // 同步探测侧栏 folder-item：不依赖 raf。
+    // 打包后 WebView2 里 raf 帧率较低，且 onUp 里 cancelAnimationFrame 会
+    // 取消最后一次 applyFrame——用户快速拖到侧栏立即松手时 _sidebarDropTarget
+    // 就漏写，handleCrossFolderDrop 分支进不去。改成同步探测避免这个 race。
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+    const li = hit && hit.closest ? hit.closest(".folder-item") : null;
+    if (li !== _sidebarDropTarget) {
+      if (_sidebarDropTarget) _sidebarDropTarget.classList.remove("block-move-target");
+      if (li) li.classList.add("block-move-target");
+      _sidebarDropTarget = li;
+    }
     latestEv = ev;
     if (raf === null) raf = requestAnimationFrame(applyFrame);
   };
@@ -2011,18 +2015,18 @@ function startDrag(e, el, b) {
     el.style.transform = "";
     document.body.style.cursor = "";
     guideV.hidden = true; guideH.hidden = true;
-    /* 跨任务夹迁移：松手时若悬停在另一个任务夹上，直接迁过去。
-     * 不做二次确认——用户可以再拖回来；速度优先。
-     * 注意：先保存 targetId 再清理类，最后置空引用——顺序写反会永远走不进 if 分支。 */
+    /* 跨任务夹迁移：松手时用 elementFromPoint 再探测一次目标夹。
+     * 不依赖 _sidebarDropTarget——后者可能因为 raf 被 cancel 而漏写；
+     * 这里兜底，只要松手时手指在某个 folder-item 上就迁过去。 */
+    const finalHit = document.elementFromPoint(upEv.clientX, upEv.clientY);
+    const finalLi = finalHit && finalHit.closest ? finalHit.closest(".folder-item") : null;
     if (_sidebarDropTarget) {
-      const targetId = Number(_sidebarDropTarget.dataset.id);
-      const targetLi = _sidebarDropTarget;
+      _sidebarDropTarget.classList.remove("block-move-target");
       _sidebarDropTarget = null;
-      targetLi.classList.remove("block-move-target");
-      // 用 elementFromPoint 再确认一次（避免最后一次 move 与 up 之间用户又移开）
-      const finalHit = document.elementFromPoint(upEv.clientX, upEv.clientY);
-      const finalLi = finalHit && finalHit.closest ? finalHit.closest(".folder-item") : null;
-      if (finalLi && Number(finalLi.dataset.id) === targetId) {
+    }
+    if (finalLi) {
+      const targetId = Number(finalLi.dataset.id);
+      if (targetId !== Number(activeFolderId)) {
         handleCrossFolderDrop(targetId, el, b);
       }
       return;
