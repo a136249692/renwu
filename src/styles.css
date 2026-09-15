@@ -329,6 +329,14 @@ body.is-dragging .bg::after { opacity: 0; }
 .block.row .block-meta { margin-top: 0; }
 .block.align-anim { transition: left 0.28s var(--ease), top 0.28s var(--ease); }
 
+/* 普通（非便利贴、非列表）块：padding-top 加大到 32，让 × 按钮（top:7 h:22，
+   占 7~29 纵区）与标题首行（从 32 起）在纵向上不重叠；padding-right 44 保证
+   第一行长文字不会撞到右上角 × */
+.block:not(.sticky):not(.row) {
+  padding-top: 32px;
+  padding-right: 44px;
+}
+
 .block-title {
   font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap;
   outline: none; min-height: 22px; user-select: none; -webkit-user-drag: none;
@@ -361,13 +369,34 @@ body.show-card-actions .block-check { opacity: 1; }
 body.show-card-actions .block-del { opacity: 1; }
 
 .block-del {
-  position: absolute; top: 9px; right: 33px; width: 19px; height: 19px; border-radius: 6px;
-  border: none; background: transparent; color: var(--faint); cursor: var(--cursor-arrow);
-  font-size: 15px; line-height: 1; opacity: 0; transition: all 0.18s var(--ease);
+  position: absolute; top: 7px; right: 31px;
+  width: 22px; height: 22px; padding: 0;
+  border-radius: 6px;
+  border: none; background: transparent; color: var(--faint);
+  cursor: var(--cursor-arrow);
+  font-size: 14px; line-height: 1; opacity: 0;
+  transition: all 0.18s var(--ease);
   display: grid; place-items: center;
+  box-sizing: border-box;
 }
 .block:hover .block-del { opacity: 1; }
 .block-del:hover { color: #fff; background: var(--danger); }
+/* 两步确认（无对话框版）：第一次点击进入 pending 态，视觉变成红底 + 文案变「确认」，
+   等 1.5s 内第二次点击直接删除；期间点画布空白自动恢复。
+   width 从 22 撑到 auto 以容纳「确认」两字。*/
+.block-del.pending {
+  opacity: 1 !important;
+  width: auto; min-width: 22px;
+  padding: 0 8px;
+  color: #fff; background: var(--danger);
+  font-size: 11.5px; font-weight: 600;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.35);
+  animation: delPendingPulse 0.7s var(--ease) infinite;
+}
+@keyframes delPendingPulse {
+  0%, 100% { box-shadow: 0 2px 8px rgba(220, 38, 38, 0.35); }
+  50% { box-shadow: 0 2px 12px rgba(220, 38, 38, 0.55); }
+}
 
 .block.editing {
   box-shadow: var(--sh-md), 0 0 0 3px var(--accent-soft);
@@ -512,6 +541,32 @@ body.show-card-actions .block-del { opacity: 1; }
 }
 .update-progress { display: none; }
 .update-progress.show { display: block; }
+/* SmartScreen 提示：只 Windows 显示，柔和黄底、不抢戏但一眼能读到 */
+.update-smartscreen {
+  padding: 10px 12px; border-radius: var(--radius-xs);
+  background: rgba(240, 185, 58, 0.12);
+  border: 1px solid rgba(240, 185, 58, 0.35);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.update-smartscreen[hidden] { display: none; }
+.smartscreen-title {
+  font-size: 12.5px; font-weight: 650; color: #8a6200;
+  display: flex; align-items: center; gap: 6px; line-height: 1.2;
+}
+.smartscreen-title::before {
+  content: "⚠"; font-size: 13px;
+}
+.smartscreen-body {
+  font-size: 12px; line-height: 1.6; color: var(--text);
+  word-break: break-word;
+}
+.smartscreen-body b { color: var(--text-strong); }
+.smartscreen-body .smartscreen-tip {
+  display: block; margin-top: 6px;
+  padding: 5px 8px; border-radius: 6px;
+  background: rgba(240, 185, 58, 0.18);
+  color: #6a4d00; font-size: 11.5px; line-height: 1.5;
+}
 .update-bar-wrap {
   width: 100%; height: 6px; border-radius: 999px;
   background: rgba(28,31,38,0.12); overflow: hidden;
@@ -695,18 +750,33 @@ body { cursor: var(--cursor-arrow); }
   position: relative !important;
   top: auto !important; left: auto !important;
   min-width: 0 !important; max-width: none !important; width: auto !important;
-  padding: 14px 40px 12px 15px;
+  /* padding-top 加大让 × 按钮占据独立一行（按钮 top:8 h:22 → 底部 30px），
+     标题/正文从 padding-top 32px 开始，永远不与 × 在纵向上重叠；
+     padding-right 44px 保持文字右边留白，避免第一行长文字撞到右上角 × */
+  padding: 32px 44px 14px 15px;
   background: var(--sticky-bg, #fff9c4);
   border: none;
   box-shadow:
     0 2px 5px rgba(0,0,0,0.08),
     0 8px 18px rgba(0,0,0,0.06),
     inset 0 1px 0 rgba(255,255,255,0.4);
-  cursor: var(--cursor-arrow);
+  cursor: grab;
   transform: rotate(var(--rot, 0deg));
   transition: box-shadow 0.2s var(--ease), transform 0.25s var(--ease);
   z-index: 2;
   display: flex; flex-direction: column;
+}
+/* 拖动交互视觉反馈 */
+.block.sticky:active { cursor: grabbing; }
+.block.sticky.block-dragging {
+  opacity: 0.45;
+  box-shadow: 0 12px 24px rgba(0,0,0,0.18);
+  transform: rotate(0deg) scale(1.02);
+  cursor: grabbing;
+}
+.block.sticky.block-drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: 3px;
 }
 .board.sticky-wall .block.sticky:hover {
   transform: rotate(0deg) translateY(-3px);

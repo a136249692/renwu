@@ -289,7 +289,17 @@ const api = {
       if (list) return list.map(mapTask);
     }
     const d = lsLoadAll();
-    return (d.tasks || []).filter(t => t.folder_id === folderId).map(mapTask);
+    let list = (d.tasks || []).filter(t => t.folder_id === folderId);
+    // 便利贴夹在浏览器兜底模式下按 sort_order 排序（拖放持久化依赖它）
+    const f = folders.find(x => x.id === folderId);
+    if (f && isStickyFolder(f) && list.length > 1) {
+      list = list.slice().sort((a, b) => {
+        const sa = Number(a.sort_order) || 0, sb = Number(b.sort_order) || 0;
+        if (sa !== sb) return sa - sb;
+        return (Number(a.created_at) || 0) - (Number(b.created_at) || 0);
+      });
+    }
+    return list.map(mapTask);
   },
   async createTask(folderId, title, x, y) {
     if (isTauri()) {
@@ -330,6 +340,24 @@ const api = {
     if (isTauri()) return invoke("delete_task", { id });
     const d = lsLoadAll();
     d.tasks = (d.tasks || []).filter(x => x.id !== id);
+    lsSaveAll(d);
+  },
+  /* 便利贴夹：把当前夹内便签按 ids 的顺序写入持久层。
+   * Tauri: 调 reorder_tasks 一次性把 sort_order 更新为 1..N。
+   * 浏览器: 更新 localStorage 里的 sort_order（getTasks 用同值兜底，
+   *          DB 端 ORDER BY 已含 created_at/ID，但这里显式写值保持一致）。 */
+  async reorderSticky(ids) {
+    if (!ids || !ids.length) return;
+    if (isTauri()) {
+      const n = await invoke("reorder_tasks", { ids });
+      return n === null ? null : n;
+    }
+    const d = lsLoadAll();
+    const idx = new Map(ids.map((id, i) => [id, i + 1]));
+    for (const t of d.tasks || []) {
+      if (t.folder_id !== activeFolderId) continue;
+      if (idx.has(t.id)) t.sort_order = idx.get(t.id);
+    }
     lsSaveAll(d);
   },
   /* 打开数据目录：仅桌面端支持，浏览器预览模式下按钮会被隐藏 */
@@ -526,7 +554,14 @@ function alignPendingBlocks() {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     maxY = Math.max(maxY, b.y + (el ? el.offsetHeight : 48) + 40);
   }
-  board.style.height = Math.max(maxY, canvas.clientHeight - 2) + "px";
+  // 与 relayout 保持一致：额外追加 CANVAS_BOTTOM_PAD 的空白区，
+  // 保证靠左对齐后待完成区下方仍有可滚动的留白（否则对齐后画布会被压到视口高，
+  // 用户就看不到「未勾选状态」下那块底部空白）
+  // 注意：必须先用原始 canvas 高度做基准，否则下面 style.height 一改，
+  // canvas.clientHeight 会跟着变化（feedback loop），下一轮 relayout 用
+  // 新高度会越叠越厚
+  const originalVpH = canvas.clientHeight;
+  board.style.height = Math.max(maxY + CANVAS_BOTTOM_PAD, originalVpH) + "px";
   setTimeout(() => els.forEach(el => el && el.classList.remove("align-anim")), 340);
 }
 
@@ -582,8 +617,19 @@ function renderFolders() {
     const handleHtml = locked
       ? '<span class="drag-handle" title="固定位置，不可拖动">⋮⋮</span>'
       : '<span class="drag-handle" title="拖动可调整位置">⋮⋮</span>';
-    li.innerHTML = `${handleHtml}<span class="ico">📁</span><span class="name"></span>${starHtml}${locked ? '<span class="lock-icon">🔒</span>' : ''}<button class="rm" title="删除任务夹">×</button>`;
+    li.innerHTML = `${handleHtml}<span class="ico">📁</span><span class="name"></span><span class="cnt"></span>${starHtml}${locked ? '<span class="lock-icon">🔒</span>' : ''}<button class="rm" title="删除任务夹">×</button>`;
     li.querySelector(".name").textContent = f.name;
+    // 待完成数量 = 总数 - 已完成数。
+    // Tauri: get_folders SQL 里已聚合 total/completed。
+    // 浏览器: localStorage 的 folders 不随任务变动，直接从 d.tasks 现算，
+    //         保证新建/删除/勾选任务后侧栏数量立即正确。
+    let pendingCount = (Number(f.total) || 0) - (Number(f.completed) || 0);
+    if (!isTauri()) {
+      const d = lsLoadAll();
+      const fs = (d.tasks || []).filter(t => t.folder_id === f.id);
+      pendingCount = fs.filter(t => !t.is_completed).length;
+    }
+    if (pendingCount > 0) li.querySelector(".cnt").textContent = String(pendingCount);
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
       selectFolder(f.id);
@@ -742,6 +788,43 @@ function renderAll() {
  *  便利贴墙：布局、搜索、header 状态
  * ═══════════════════════════════════════════════════ */
 
+/* 便利贴夹：当前正在拖动的块元素（模块级引用，跨元素访问用） */
+let _stickyDragEl = null;
+
+/* 便利贴夹：允许拖到 board 空白区域——放到末尾。
+ * 单个块的 dragover/drop 会优先命中；这里只在没有拖目标时生效。 */
+if (!board.__stickyDropBound) {
+  board.__stickyDropBound = true;
+  board.addEventListener("dragover", e => {
+    if (!_stickyDragEl) return;
+    if (e.target !== board && !e.target.classList.contains("board-empty")) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  });
+  board.addEventListener("drop", e => {
+    if (!_stickyDragEl) return;
+    if (e.target !== board && !e.target.classList.contains("board-empty")) return;
+    e.preventDefault();
+    board.appendChild(_stickyDragEl);
+    applyStickyLayout();
+    persistStickyOrder();
+  });
+}
+
+/* 便利贴夹：把当前 DOM 顺序同步回内存 blocks 数组，并调用 API 持久化到
+ * SQLite / localStorage。拖放结束后调用；失败静默降级（下一次拖放会重写）。 */
+function persistStickyOrder() {
+  const newOrder = [...board.querySelectorAll(".block.sticky")].map(el => Number(el.dataset.id));
+  const map = new Map(blocks.map(b => [Number(b.id), b]));
+  const ordered = newOrder.map(id => map.get(id)).filter(Boolean);
+  blocks.forEach(b => { if (!newOrder.includes(Number(b.id))) ordered.push(b); });
+  blocks = ordered;
+  // fire-and-forget：拖放手感优先，持久化异步进行
+  api.reorderSticky(newOrder).catch(err => {
+    console.warn("[玻光画布] 便利贴顺序持久化失败:", err);
+  });
+}
+
 /* 决定一个块是否被搜索关键词命中（标题 / 正文，忽略大小写） */
 function stickyMatches(el, q) {
   if (!q) return true;
@@ -818,6 +901,33 @@ function applyStickyLayout() {
     el.style.left = "";
   });
   board.style.height = "auto";
+}
+
+/* 便利贴夹：把 id=dragId 的块移到 id=targetId 的块旁边。
+ * 判断放在目标块之前还是之后：按 drop 时鼠标在目标块上半/下半决定。
+ * DOM 顺序即显示顺序，同步 reorder 内存里的 blocks 数组，保证颜色/旋转由位置派生。 */
+function reorderStickyBlocks(dragId, targetId, pos) {
+  dragId = Number(dragId); targetId = Number(targetId);
+  const dragEl = board.querySelector(`.block.sticky[data-id="${dragId}"]`);
+  const targetEl = board.querySelector(`.block.sticky[data-id="${targetId}"]`);
+  if (!dragEl || !targetEl || dragEl === targetEl) return;
+
+  // 决定放在目标之前还是之后
+  let place = "after";
+  if (pos) place = pos;
+  else if (lastDropPos) {
+    const r = targetEl.getBoundingClientRect();
+    place = (lastDropPos.clientY < r.top + r.height / 2) ? "before" : "after";
+  }
+
+  if (place === "before") targetEl.parentNode.insertBefore(dragEl, targetEl);
+  else {
+    if (targetEl.nextSibling) targetEl.parentNode.insertBefore(dragEl, targetEl.nextSibling);
+    else targetEl.parentNode.appendChild(dragEl);
+  }
+
+  applyStickyLayout();
+  persistStickyOrder();
 }
 
 /* 更新便利贴 header 的计数 / 视图按钮 / 搜索清空按钮可见性 */
@@ -1051,11 +1161,37 @@ function makeBlock(b) {
   del.className = "block-del";
   del.textContent = "×";
   del.title = "删除";
+  // 两步按钮点击防误触（无对话框版）：
+  //   第一次点击 → 按钮变红 + 文案变「删除」→「确认」，视觉确认态，1.5s 无二次点击自动恢复。
+  //   第二次点击 → 直接删除，不再弹 confirm()。
+  // 目的：单次误触只让按钮变色，不弹任何对话框；用户看到按钮已经在「确认」态，
+  // 再点一次才是明确的删除意图。移除 confirm() 是因为它反而让「第一次点击」像
+  // 真的删除流程，用户不敢继续，取消时又被弹窗打断，比「一步」还糟。
+  let delConfirmTimer = null;
+  const resetDel = () => {
+    del.classList.remove("pending");
+    del.textContent = "×";
+    del.title = "删除";
+    if (delConfirmTimer) { clearTimeout(delConfirmTimer); delConfirmTimer = null; }
+  };
   del.addEventListener("click", e => {
     e.stopPropagation();
-    if (!confirm("确定删除此内容块？此操作不可撤销。")) return;
+    if (!del.classList.contains("pending")) {
+      del.classList.add("pending");
+      del.textContent = "确认";
+      del.title = "再点一次确认删除";
+      delConfirmTimer = setTimeout(resetDel, 1500);
+      // 用户不知道下一步做什么时容易慌，用 toast 明说「你已经点了，再点一次」
+      toast("再点一次「确认」完成删除");
+      return;
+    }
+    resetDel();
     removeBlock(b.id);
   });
+  // 编辑进入、点空白、离开窗口焦点时清除 pending，避免「1.5s 后没触发又忘了」的残留
+  el.addEventListener("mousedown", e => {
+    if (e.target !== del) resetDel();
+  }, true);
 
   if (inSticky) {
     /* 便利贴夹：无完成/未完成概念，隐藏勾选；有标题时置顶 */
@@ -1070,6 +1206,53 @@ function makeBlock(b) {
     el.append(title, meta, del);
   } else {
     el.append(title, meta, check, del);
+  }
+
+  /* ── 便利贴夹：原生 HTML5 拖放，允许在瀑布/列表里拖到其他块的位置互换 ── */
+  if (inSticky) {
+    el.setAttribute("draggable", "true");
+    el.addEventListener("dragstart", e => {
+      if (el.classList.contains("editing")) {
+        e.preventDefault();
+        return;
+      }
+      if (e.target === check || e.target === del) { e.preventDefault(); return; }
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", String(b.id)); } catch (_) {}
+      _stickyDragEl = el;
+      /* 稍等一帧再加类，避免浏览器把正在拖的截图带成半透明态 */
+      requestAnimationFrame(() => el.classList.add("block-dragging"));
+    });
+    el.addEventListener("dragover", e => {
+      if (!_stickyDragEl) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      if (_stickyDragEl === el) { el.classList.remove("block-drop-target"); return; }
+      board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => {
+        if (n !== el) n.classList.remove("block-drop-target");
+      });
+      el.classList.add("block-drop-target");
+    });
+    el.addEventListener("dragleave", () => {
+      el.classList.remove("block-drop-target");
+    });
+    el.addEventListener("drop", e => {
+      e.preventDefault();
+      el.classList.remove("block-drop-target");
+      board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => n.classList.remove("block-drop-target"));
+      if (!_stickyDragEl) return;
+      const dragId = Number(_stickyDragEl.dataset.id);
+      const targetId = b.id;
+      if (String(dragId) === String(targetId)) return;
+      const r = el.getBoundingClientRect();
+      const pos = (e.clientY < r.top + r.height / 2) ? "before" : "after";
+      reorderStickyBlocks(dragId, targetId, pos);
+    });
+    el.addEventListener("dragend", () => {
+      el.classList.remove("block-dragging");
+      board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => n.classList.remove("block-drop-target"));
+      _stickyDragEl = null;
+    });
   }
 
   el.addEventListener("dblclick", e => {
@@ -1706,6 +1889,10 @@ function openUpdateModal(update, onProgress) {
   $("update-cancel").hidden = false;
   $("update-install").hidden = false;
   $("update-install").textContent = "下载并安装";
+  // 未购买代码签名证书，Windows 首次打开 exe 时会弹 SmartScreen 「打开前请确保信任此应用」。
+  // 这里在弹窗内前置说明，避免用户以为是病毒而中止安装；macOS/Linux 没有该警告，隐藏。
+  const ss = $("update-smartscreen");
+  if (ss) ss.hidden = !/Windows/.test(navigator.userAgent);
   m.hidden = false;
   // 下载进度回调：onEvent({event:'Started'|'Progress'|'Finished', data:{contentLength?|chunkLength}})
   let total = 0, done = 0;

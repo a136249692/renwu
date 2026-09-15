@@ -140,6 +140,17 @@
       <div class="modal modal-update">
         <h3>发现新版本 <span id="update-version">v1.0.0</span></h3>
         <div class="update-notes" id="update-notes">（此版本没有更新说明）</div>
+        <!-- 首次下载的信任警告前置说明：浏览器会拦截，Windows SmartScreen 也会拦。
+             两者都不是病毒警告，操作路径提前写清，避免用户放弃安装。
+             macOS/Linux 不显示。-->
+        <div class="update-smartscreen" id="update-smartscreen" hidden>
+          <div class="smartscreen-title">首次下载信任提示</div>
+          <div class="smartscreen-body">
+            <b>① 浏览器拦截</b>（Chrome / Edge）：下载时弹出「<b>打开前请确保信任</b>」/「此文件可能对设备有害」——因为下载源是 GitHub / CNB 直链，域名信誉较低，<b>并非病毒</b>，点「<b>保留</b>」/「<b>Keep</b>」即可。<br />
+            <b>② Windows 提示</b>：双击安装程序时弹出「<b>已保护你的电脑</b>」——因为安装包未购买代码签名证书，<b>也不是病毒</b>，点「<b>更多信息</b>」→「<b>仍要运行</b>」继续安装。<br />
+            <span class="smartscreen-tip">💡 直接用本应用内的「下载并安装」可跳过浏览器拦截，只会在双击 exe 时遇到 ②。</span>
+          </div>
+        </div>
         <div class="update-progress" id="update-progress">
           <div class="update-bar-wrap">
             <div class="update-bar" id="update-bar" style="width:0%"></div>
