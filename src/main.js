@@ -1069,6 +1069,19 @@ async function handleCrossFolderDrop(targetFolderId, el, b) {
   // 从当前 blocks 里移除（当前夹的 DOM 元素也移除）
   blocks = blocks.filter(x => x.id !== b.id);
   if (el.parentElement) el.remove();
+  // 就地同步 folders[] 的 total/completed：否则 updateFolderCount / renderFolders
+  // 读的还是 SQLite 里的旧值，用户必须再点一次夹子才看到新数字。
+  const srcDecDone = srcIsSticky ? 0 : (b.done ? 1 : 0);
+  const dstIncDone = dstIsSticky ? 0 : (b.done ? 1 : 0);
+  const srcFolder = folders.find(f => Number(f.id) === Number(srcFolderId));
+  if (srcFolder) {
+    srcFolder.total = Math.max(0, (Number(srcFolder.total) || 0) - 1);
+    srcFolder.completed = Math.max(0, (Number(srcFolder.completed) || 0) - srcDecDone);
+  }
+  if (target) {
+    target.total = (Number(target.total) || 0) + 1;
+    target.completed = (Number(target.completed) || 0) + dstIncDone;
+  }
   // 刷新源夹与目标夹的待完成计数——跨夹移动会同时影响两边
   updateFolderCount(srcFolderId);
   updateFolderCount(targetFolderId);
