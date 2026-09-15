@@ -329,10 +329,51 @@ const api = {
    * 保留 folder_id / x / y / is_completed / sort_order；仅 content / 归属夹变化。
    * 之所以用「新建+删除」而不是 update，是因为 update_task_position 等 Tauri 命令
    * 只按 id 更新单个字段，没有 update_task_folder；走两步骤在两套存储里最省事，
-   * 也不需要改 Rust 侧 schema。 */
+   * 也不需要改 Rust 侧 schema。
+   *
+   * 源任务读取顺序：
+   *   1) 内存 blocks（最快，桌面/浏览器都有）
+   *   2) 后端 get_tasks（桌面端专用，兜底「切换夹后 blocks 未包含目标 id」的极端情况）
+   *   3) localStorage mirror（浏览器预览或历史遗留数据）
+   * 打包后 isTauri()=true 且 localStorage 无 glassCanvas.v1 数据，因此必须走前两条。 */
   async moveTaskToFolder(id, targetFolderId) {
-    const d = lsLoadAll();
-    const src = (d.tasks || []).find(t => t.id === id);
+    let src = null;
+    // 1) 内存 blocks
+    const memB = blocks.find(t => Number(t.id) === Number(id));
+    if (memB && Number(memB.folderId) !== Number(targetFolderId)) {
+      src = {
+        id: memB.id, folder_id: memB.folderId,
+        content: memB.title || "",
+        is_completed: memB.done ? 1 : 0,
+        sort_order: memB.sort_order || 0,
+        x: memB.x ?? 16, y: memB.y ?? 0,
+      };
+    }
+    // 2) 后端：按 id 从所有 folder 中查（get_tasks 只按夹查，故需先扫所有夹）
+    if (!src && isTauri()) {
+      for (const f of folders) {
+        if (Number(f.id) === Number(targetFolderId)) continue;
+        const list = await invoke("get_tasks", { folderId: f.id });
+        if (!list || !list.length) continue;
+        const t = list.find(x => Number(x.id) === Number(id));
+        if (t) {
+          src = {
+            id: t.id, folder_id: t.folder_id,
+            content: t.content || "",
+            is_completed: t.is_completed ? 1 : 0,
+            sort_order: t.sort_order || 0,
+            x: t.x ?? 16, y: t.y ?? 0,
+          };
+          break;
+        }
+      }
+    }
+    // 3) localStorage 兜底
+    if (!src) {
+      const d = lsLoadAll();
+      const found = (d.tasks || []).find(t => Number(t.id) === Number(id));
+      if (found) src = found;
+    }
     if (!src || Number(src.folder_id) === Number(targetFolderId)) return null;
     if (isTauri()) {
       const nb = await invoke("create_task", {
@@ -341,9 +382,10 @@ const api = {
         positionX: src.x ?? 16,
         positionY: src.y ?? 0,
       });
-      await invoke("delete_task", { id });
+      await invoke("delete_task", { id: src.id });
       return nb ? mapTask(nb) : null;
     }
+    const d = lsLoadAll();
     const nt = {
       id: nextMockId(),
       folder_id: targetFolderId,
@@ -354,7 +396,7 @@ const api = {
       x: src.x ?? 16,
       y: src.y ?? 0,
     };
-    d.tasks = (d.tasks || []).filter(t => t.id !== id);
+    d.tasks = (d.tasks || []).filter(t => Number(t.id) !== Number(src.id));
     d.tasks.push(nt);
     lsSaveAll(d);
     return mapTask(nt);
@@ -827,8 +869,14 @@ function updateFolderCount(folderId) {
   if (Number(folderId) === Number(activeFolderId)) {
     // 当前夹：内存 blocks 是最新的（勾选/删除/合并/拖过分界线都已同步到 b.done）
     pending = blocks.filter(b => !b.done).length;
+  } else if (isTauri()) {
+    // Tauri 桌面端：其他夹的实时计数从后端拉。
+    // 之前的实现走 localStorage mirror，打包后 localStorage 里根本没有 glassCanvas.v1 数据，
+    // 结果任何非当前夹的计数刷新都算成 0——所以侧栏「待完成 N」徽章在跨夹拖动后卡住不动。
+    const f = folders.find(x => Number(x.id) === Number(folderId));
+    pending = f ? Math.max(0, (Number(f.total) || 0) - (Number(f.completed) || 0)) : 0;
   } else {
-    // 其他夹：查 localStorage mirror（mirrorNow 在切换夹之前会写入当前夹最新状态）
+    // 浏览器预览：localStorage 是唯一数据源，直接从 d.tasks 现算
     const d = lsLoadAll();
     const fs = (d.tasks || []).filter(t => t.folder_id === folderId);
     pending = fs.filter(t => !t.is_completed).length;
@@ -838,6 +886,7 @@ function updateFolderCount(folderId) {
   else cntEl.textContent = "";
 
   // 桌面端：让内存里的 folders.total/completed 追上 SQLite，供下次 renderFolders 使用
+  // （否则下一次 renderFolders 会拿到旧的 total/completed 覆盖刚写入的正确值）
   if (isTauri()) {
     clearTimeout(_folderCountTimer);
     _folderCountTimer = setTimeout(() => { reloadFolders().catch(() => {}); }, 500);
@@ -998,20 +1047,31 @@ async function handleCrossFolderDrop(targetFolderId, el, b) {
       destTitle = srcContent;
     }
   }
+  const srcFolderId = b.folderId;
   const moved = await api.moveTaskToFolder(b.id, targetFolderId);
-  if (!moved) { flashSave(); return; }
+  if (!moved) { flashSave(); toast("跨任务夹移动失败，请重试"); return; }
   // 形态变化时同步修正内容
   if (destTitle !== srcContent) {
     await api.updateContent(moved.id, destTitle);
   }
-  // 速记夹没有「已完成」概念，任何进入速记夹的块重置为未完成，
-  // 避免源夹遗留的 is_completed 让速记夹在列表/瀑布里多出无意义状态。
-  if (dstIsSticky && moved.done) {
-    await api.toggleTask(moved.id, false);
+  // 目标夹是速记夹：便签夹没有「已完成」概念，任何进入速记夹的块重置为未完成
+  // 否则源夹遗留的 is_completed 会让速记夹列表多出无意义状态
+  // 目标夹是普通夹：保持源夹的完成状态（源夹已完成 → 目标夹也已完成）
+  if (dstIsSticky) {
+    if (moved.done) { await api.toggleTask(moved.id, false); }
+  } else if (srcIsSticky) {
+    // 速记夹 → 普通夹：速记夹内所有块都视为未完成，无需切换
+  } else if (moved.done !== b.done) {
+    // 普通夹 → 普通夹：moveTaskToFolder 创建的新任务默认 is_completed=false，
+    // 若源块是已完成状态，需要同步切换回已完成
+    if (b.done) { await api.toggleTask(moved.id, true); }
   }
   // 从当前 blocks 里移除（当前夹的 DOM 元素也移除）
   blocks = blocks.filter(x => x.id !== b.id);
   if (el.parentElement) el.remove();
+  // 刷新源夹与目标夹的待完成计数——跨夹移动会同时影响两边
+  updateFolderCount(srcFolderId);
+  updateFolderCount(targetFolderId);
   renderFolders();
   if (srcIsSticky) applyStickyLayout();
   toast(`已移动到「${target.name}」`);
