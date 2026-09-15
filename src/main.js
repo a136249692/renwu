@@ -325,6 +325,40 @@ const api = {
     if (t) { t.x = x; t.y = y; }
     lsSaveAll(d);
   },
+  /* 把任务跨任务夹迁移：在目标夹里新建一条相同内容的任务，删除源夹原记录。
+   * 保留 folder_id / x / y / is_completed / sort_order；仅 content / 归属夹变化。
+   * 之所以用「新建+删除」而不是 update，是因为 update_task_position 等 Tauri 命令
+   * 只按 id 更新单个字段，没有 update_task_folder；走两步骤在两套存储里最省事，
+   * 也不需要改 Rust 侧 schema。 */
+  async moveTaskToFolder(id, targetFolderId) {
+    const d = lsLoadAll();
+    const src = (d.tasks || []).find(t => t.id === id);
+    if (!src || Number(src.folder_id) === Number(targetFolderId)) return null;
+    if (isTauri()) {
+      const nb = await invoke("create_task", {
+        folderId: targetFolderId,
+        content: src.content || "",
+        positionX: src.x ?? 16,
+        positionY: src.y ?? 0,
+      });
+      await invoke("delete_task", { id });
+      return nb ? mapTask(nb) : null;
+    }
+    const nt = {
+      id: nextMockId(),
+      folder_id: targetFolderId,
+      content: src.content || "",
+      is_completed: src.is_completed ? 1 : 0,
+      created_at: Date.now(),
+      sort_order: src.sort_order || 0,
+      x: src.x ?? 16,
+      y: src.y ?? 0,
+    };
+    d.tasks = (d.tasks || []).filter(t => t.id !== id);
+    d.tasks.push(nt);
+    lsSaveAll(d);
+    return mapTask(nt);
+  },
   async toggleTask(id, isCompleted) {
     if (isTauri()) {
       const t = await invoke("toggle_task", { id, isCompleted });
@@ -405,6 +439,27 @@ let activeFolderId = null;
 let saveTimer = null;
 let savedPositions = {};
 let alignMode = false;
+const ALIGN_KEY = "glassCanvas.alignModeByFolder";
+function loadAlignMap() {
+  try {
+    const raw = localStorage.getItem(ALIGN_KEY);
+    if (!raw) return {};
+    const p = JSON.parse(raw);
+    return p && typeof p === "object" ? p : {};
+  } catch { return {}; }
+}
+function getAlignMode(folderId) {
+  const map = loadAlignMap();
+  return !!map[String(folderId)];
+}
+function saveAlignMode(folderId, val) {
+  try {
+    const map = loadAlignMap();
+    if (val) map[String(folderId)] = 1;
+    else delete map[String(folderId)];
+    localStorage.setItem(ALIGN_KEY, JSON.stringify(map));
+  } catch {}
+}
 
 /* ---------- DOM 引用 ---------- */
 const $ = id => document.getElementById(id);
@@ -521,13 +576,37 @@ function persistAllDonePositions() {
   }
 }
 
-/* ---------- 待完成块靠左对齐 / 恢复原位 ---------- */
-function alignPendingBlocks() {
-  const pending = blocks.filter(b => !b.done);
+/* ---------- 待完成块靠左对齐 / 恢复原位 ----------
+   appendIds：本轮需要追加到栈底的新块 id 数组（新建、跨夹迁入等）。
+   - 传 [] 或 null：按「当前 y 升序」重排——保留用户在勾选前手动摆放的视觉顺序；
+     首次勾选对齐、勾选/取消勾选、跨区拖动、删除合并等场景都走这条路径。
+   - 传非空数组：旧块按当前 y 升序排列（保持视觉顺序不变），新块统一追加到最下边行，
+     实现「输入内容后自动追加到最下边行」。
+   首次调用（savedPositions 为空）会把当前坐标缓存下来，取消勾选时可以还原。 */
+function alignPendingBlocks(appendIds) {
+  // 处于「放大编辑」态的块不能参与重排——重排会写 b.x/b.y，
+  // 退出放大后坐标就是错的（CSS 放大态下 b.x/b.y 是无效的，
+  // 因为 position: fixed 用 left/top: 5% 覆盖，退出后应恢复到原位置）。
+  const pending = blocks.filter(b => {
+    if (b.done) return false;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    return el ? !el.classList.contains("zoomed") : true;
+  });
   if (!pending.length) return;
-  savedPositions = {};
-  pending.forEach(b => { savedPositions[b.id] = { x: b.x, y: b.y }; });
-  pending.sort((a, b) => (a.y || 0) - (b.y || 0));
+  if (Object.keys(savedPositions).length === 0) {
+    savedPositions = {};
+    pending.forEach(b => { savedPositions[b.id] = { x: b.x, y: b.y }; });
+  }
+  const newSet = new Set(appendIds || []);
+  // 旧块按当前 y 升序（视觉顺序），新块统一追加到底部
+  pending.sort((a, b) => {
+    const aIsNew = newSet.has(a.id), bIsNew = newSet.has(b.id);
+    if (aIsNew !== bIsNew) return aIsNew ? 1 : -1;
+    if (aIsNew && bIsNew) {
+      return ((a.createdAt || 0) - (b.createdAt || 0)) || (a.id - b.id);
+    }
+    return (a.y || 0) - (b.y || 0);
+  });
   const els = pending.map(b => {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (el) el.classList.add("align-anim");
@@ -652,7 +731,7 @@ function renderFolders() {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
       openModal("rename", f);
     });
-    // 拖动排序：只有非速记夹可以拖动
+    // 拖动排序：只有非速记夹可以拖动（作为拖源）
     if (!locked) {
       li.addEventListener("dragstart", e => {
         if (e.target.closest(".rm") || e.target.closest(".star-btn")) { e.preventDefault(); return; }
@@ -671,28 +750,98 @@ function renderFolders() {
         _dragLastX = null;
         _dragLastY = null;
       });
-      li.addEventListener("dragover", e => {
-        if (_dragFolderId === null) return;
+    }
+    // 拖入目标：所有任务夹都可以作为 drop target（含速记夹），
+    // 用来接收从便签墙 HTML5 DnD 拖过来的块
+    li.addEventListener("dragover", e => {
+      // 文件夹重排：只有正在拖文件夹时才算
+      if (_dragFolderId !== null) {
         e.preventDefault();
         _dragLastX = e.clientX;
         _dragLastY = e.clientY;
         if (li.dataset.id !== String(_dragFolderId)) li.classList.add("drag-over");
         else li.classList.remove("drag-over");
-      });
-      li.addEventListener("dragleave", () => {
-        li.classList.remove("drag-over");
-      });
-      li.addEventListener("drop", e => {
+        return;
+      }
+      // 便签块跨夹移动：仅在正从便签墙拖便签块时算
+      if (_stickyDragEl) {
         e.preventDefault();
-        li.classList.remove("drag-over");
-        if (_dragFolderId === null) return;
+        try { e.dataTransfer.dropEffect = "move"; } catch (_) {}
+        if (li.dataset.id !== String(activeFolderId)) li.classList.add("block-move-target");
+        else li.classList.remove("block-move-target");
+      }
+    });
+    li.addEventListener("dragleave", () => {
+      li.classList.remove("drag-over");
+      li.classList.remove("block-move-target");
+    });
+    li.addEventListener("drop", e => {
+      e.preventDefault();
+      li.classList.remove("drag-over");
+      li.classList.remove("block-move-target");
+      // 便签块跨夹移动
+      if (_stickyDragEl) {
+        const dragEl = _stickyDragEl;
+        const dragId = Number(dragEl.dataset.id);
         const targetId = Number(li.dataset.id);
-        if (targetId === _dragFolderId) return;
-        reorderFolders(_dragFolderId, targetId);
-      });
-    }
+        _stickyDragEl = null;
+        dragEl.classList.remove("block-dragging");
+        board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => n.classList.remove("block-drop-target"));
+        if (targetId === Number(activeFolderId)) return;
+        const b = blocks.find(x => x.id === dragId);
+        if (b) handleCrossFolderDrop(targetId, dragEl, b);
+        return;
+      }
+      // 文件夹重排
+      if (_dragFolderId === null) return;
+      const targetId = Number(li.dataset.id);
+      if (targetId === _dragFolderId) return;
+      reorderFolders(_dragFolderId, targetId);
+    });
     folderListEl.appendChild(li);
   });
+}
+
+/* 局部刷新侧栏某一任务夹的「待完成数量」数字。
+   勾选完成、删除、合并、拖动跨分界线等操作都会改变 pending 数，
+   但它们只走 relayout() 不刷新侧栏，导致任务夹上的数字"卡住"。
+   这里只改 .cnt 的 textContent，不重绘整栏，避免闪烁和焦点丢失。
+
+   数据源：
+   - 当前文件夹：用内存 blocks（最新，不受持久化防抖影响）
+   - 其他文件夹：从 localStorage mirror 快照算（可能滞后 ~400ms；
+     跨夹移动的路径（handleCrossFolderDrop）本就会调 renderFolders()
+     做全量刷新，所以这个降级路径只处理「切夹后再切回来」的短暂窗口）
+
+   桌面端额外在后台 reloadFolders() 让 SQLite 里的 folders.total/
+   completed 追上真实值，为下次 renderFolders() 备用。 */
+let _folderCountTimer = null;
+function updateFolderCount(folderId) {
+  if (folderId == null) return;
+  const li = folderListEl.querySelector(`.folder-item[data-id="${folderId}"]`);
+  if (!li) return;
+  const cntEl = li.querySelector(".cnt");
+  if (!cntEl) return;
+
+  let pending;
+  if (Number(folderId) === Number(activeFolderId)) {
+    // 当前夹：内存 blocks 是最新的（勾选/删除/合并/拖过分界线都已同步到 b.done）
+    pending = blocks.filter(b => !b.done).length;
+  } else {
+    // 其他夹：查 localStorage mirror（mirrorNow 在切换夹之前会写入当前夹最新状态）
+    const d = lsLoadAll();
+    const fs = (d.tasks || []).filter(t => t.folder_id === folderId);
+    pending = fs.filter(t => !t.is_completed).length;
+  }
+
+  if (pending > 0) cntEl.textContent = String(pending);
+  else cntEl.textContent = "";
+
+  // 桌面端：让内存里的 folders.total/completed 追上 SQLite，供下次 renderFolders 使用
+  if (isTauri()) {
+    clearTimeout(_folderCountTimer);
+    _folderCountTimer = setTimeout(() => { reloadFolders().catch(() => {}); }, 500);
+  }
 }
 
 /* 拖动文件夹到目标文件夹位置：把源元素插到目标之前/之后。
@@ -811,6 +960,63 @@ if (!board.__stickyDropBound) {
   });
 }
 
+/* 跨任务夹移动：把 el/b 所属的内容块从 activeFolder 迁到 targetFolderId。
+ * 触发来源有两个：
+ *   1) 普通夹里的 pointerdown 拖动 → 松手时悬停在侧栏任务夹上；
+ *   2) 速记夹里的 HTML5 DnD 拖拽 → 松手时拖到侧栏任务夹上。
+ * 语义：目标夹新建一条相同内容的记录（保留原 x/y/is_completed/sort_order），
+ *       删除源夹原记录。若目标夹是速记夹，把 body 拼回 "### 标题\n\n正文" 形式；
+ *       若源夹是速记夹而目标是普通夹，把 "### 标题\n\n正文" 拼回单行。 */
+async function handleCrossFolderDrop(targetFolderId, el, b) {
+  if (Number(targetFolderId) === Number(activeFolderId)) { flashSave(); return; }
+  const target = folders.find(f => Number(f.id) === Number(targetFolderId));
+  if (!target) return;
+  const srcContent = b.title || "";
+  let destTitle;
+  const srcIsSticky = isStickyFolderActive();
+  const dstIsSticky = isStickyFolder(target);
+  if (dstIsSticky) {
+    // 目标是速记夹：需要 "### 标题\n\n正文" 约定
+    if (srcIsSticky) {
+      // 速记夹→速记夹：原样搬入
+      destTitle = srcContent;
+    } else {
+      // 普通夹→速记夹：把首行作为标题、其余作为正文
+      const lines = srcContent.split("\n");
+      const title0 = (lines[0] || "").trim();
+      const body0 = lines.slice(1).join("\n").replace(/^\s+/, "").trimEnd();
+      destTitle = composeStickyContent(title0, body0);
+    }
+  } else {
+    // 目标是普通夹
+    if (srcIsSticky) {
+      // 速记夹→普通夹：把 "### 标题\n\n正文" 压成单行
+      const parsed = parseStickyContent(srcContent);
+      destTitle = [parsed.title, parsed.body].filter(Boolean).join("\n");
+    } else {
+      // 普通夹→普通夹：原样搬入
+      destTitle = srcContent;
+    }
+  }
+  const moved = await api.moveTaskToFolder(b.id, targetFolderId);
+  if (!moved) { flashSave(); return; }
+  // 形态变化时同步修正内容
+  if (destTitle !== srcContent) {
+    await api.updateContent(moved.id, destTitle);
+  }
+  // 速记夹没有「已完成」概念，任何进入速记夹的块重置为未完成，
+  // 避免源夹遗留的 is_completed 让速记夹在列表/瀑布里多出无意义状态。
+  if (dstIsSticky && moved.done) {
+    await api.toggleTask(moved.id, false);
+  }
+  // 从当前 blocks 里移除（当前夹的 DOM 元素也移除）
+  blocks = blocks.filter(x => x.id !== b.id);
+  if (el.parentElement) el.remove();
+  renderFolders();
+  if (srcIsSticky) applyStickyLayout();
+  toast(`已移动到「${target.name}」`);
+}
+
 /* 便利贴夹：把当前 DOM 顺序同步回内存 blocks 数组，并调用 API 持久化到
  * SQLite / localStorage。拖放结束后调用；失败静默降级（下一次拖放会重写）。 */
 function persistStickyOrder() {
@@ -899,6 +1105,13 @@ function applyStickyLayout() {
     }
     el.style.top = "";
     el.style.left = "";
+    // 关键：清空 autoSize 写入的 min-width。便利贴夹由 CSS Grid
+    // （grid-template-columns: repeat(auto-fill, minmax(220px, 1fr))）决定列宽，
+    // 而 autoSize 会把 title.scrollWidth+46 写进 el.style.minWidth（内联样式
+    // 优先级最高），一长串文本就会把整列撑到 510px，瀑布流退化成一列大卡。
+    // 这里在应用布局时强制清零，让 Grid 重新按 minmax 计算列数。
+    el.style.minWidth = "";
+    el.style.width = "";
   });
   board.style.height = "auto";
 }
@@ -1193,6 +1406,18 @@ function makeBlock(b) {
     if (e.target !== del) resetDel();
   }, true);
 
+  /* 放大编辑按钮：hover 显示在右下，点击后调用 enterZoomedEdit 把块
+     「放大」到画布视口，编辑完毕后（title blur）自动恢复原始尺寸。
+     便利贴夹由 CSS Grid 排布，不支持放大。 */
+  const zoom = document.createElement("button");
+  zoom.className = "block-zoom";
+  zoom.textContent = "⤢";
+  zoom.title = "放大编辑";
+  zoom.addEventListener("click", e => {
+    e.stopPropagation();
+    enterZoomedEdit(el, b);
+  });
+
   if (inSticky) {
     /* 便利贴夹：无完成/未完成概念，隐藏勾选；有标题时置顶 */
     check.remove();
@@ -1205,7 +1430,7 @@ function makeBlock(b) {
     }
     el.append(title, meta, del);
   } else {
-    el.append(title, meta, check, del);
+    el.append(title, meta, check, del, zoom);
   }
 
   /* ── 便利贴夹：原生 HTML5 拖放，允许在瀑布/列表里拖到其他块的位置互换 ── */
@@ -1256,7 +1481,7 @@ function makeBlock(b) {
   }
 
   el.addEventListener("dblclick", e => {
-    if (e.target === check || e.target === del) return;
+    if (e.target === check || e.target === del || e.target.classList.contains("block-zoom")) return;
     startEdit(el, b);
   });
   title.addEventListener("input", () => {
@@ -1276,6 +1501,9 @@ function makeBlock(b) {
   title.addEventListener("blur", () => {
     const txt = getTitleText(title);
     const oldContent = title.dataset.oldContent || b.title;
+    // 编辑结束前先把放大态恢复，避免下面的 return 早退漏了还原尺寸。
+    // 幂等：非放大态调用会立即返回。
+    exitZoomed(el);
     /* 空白内容块不保存：直接删除该块（含后端记录） */
     if (!txt.trim()) {
       const hadContent = (oldContent || "").trim().length > 0;
@@ -1310,6 +1538,14 @@ function makeBlock(b) {
   title.addEventListener("keydown", e => {
     // 中文输入法组词阶段回车是"上屏"，不应作提交/换行处理
     if (e.isComposing) return;
+    // 放大态下按 Esc：先只退出放大态，不做任何内容改动。
+    // 直接 title.blur() 触发 blur handler，走正常保存路径——不丢编辑内容。
+    if (el.__zoomed && e.key === "Escape") {
+      e.preventDefault();
+      exitZoomed(el);
+      title.blur();
+      return;
+    }
     if (e.key === "Escape") { e.preventDefault(); title.blur(); return; }
     if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); title.blur(); return; }
     if (e.key === "Enter") {
@@ -1364,6 +1600,14 @@ function blockFromTitle(title) {
 
 function autoSize(el, b, title) {
   if (el.classList.contains("row")) return;
+  // 放大编辑态下不需要按内容缩放宽度，尺寸由 CSS 强制为 90% 视口
+  if (el.classList.contains("zoomed")) return;
+  // 便利贴夹的宽度由 CSS Grid（.board.sticky-wall 的
+  // grid-template-columns: repeat(auto-fill, minmax(220px, 1fr))）统一分配，
+  // 不能再写 el.style.minWidth——否则内联样式会盖过 Grid 的 1fr，
+  // 把整列撑到 min-width（最高 510px），瀑布流就退化成「一列大卡」。
+  // 用户编辑便签时也不需要动态宽度，让内容自适应换行即可。
+  if (el.classList.contains("sticky")) return;
   requestAnimationFrame(() => {
     const w = Math.min(Math.max(title.scrollWidth + 46, 180), 510);
     el.style.minWidth = w + "px";
@@ -1383,6 +1627,69 @@ function startEdit(el, b) {
   const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
 }
 
+/* ---------- 放大编辑态 ----------
+   enterZoomedEdit：把当前块切换到「放大」尺寸（fixed 覆盖视口），
+   再走 startEdit 进入编辑态；title blur 时由 exitZoomed 恢复原尺寸。
+   backdrop 遮罩用 body::after 伪元素实现（CSS 的 body.zoom-active::after），
+   这里只切 body class 就能显示/隐藏，不用创建 DOM 节点。
+   便利贴夹不支持放大。
+
+   关键：必须把 el 从 .board 里移出到 document.body。
+   原因——.canvas-wrap 上有 backdrop-filter: blur(30px)，按 CSS 规范，
+   backdrop-filter（除 none 外）会让元素成为 fixed 定位子孙的「包含块」。
+   也就是说，如果 .block.zoomed 还留在 .board 里，它的 position:fixed
+   就不是相对视口，而是相对 .canvas-wrap 定位，导致尺寸和位置全都偏掉。
+   实测：view 1042×609 时，zoomed 块实测 rect = {325, 43, 652×522}
+   而不是理论值 {52, 30, 938×548}——偏移和尺寸都等于 canvas-wrap 的框。
+   移出到 body 后 fixed 才参照视口。exitZoomed 时按 __origParent
+   + __origNextSibling 精确放回原位置，视觉无缝。 */
+function enterZoomedEdit(el, b) {
+  if (el.classList.contains("sticky")) return;
+  if (el.classList.contains("editing")) return;
+  if (!el.classList.contains("block")) return;
+  // 记录原始位置，退出时精确还原（用 nextSibling 保留在兄弟中的顺序）
+  el.__origParent = el.parentElement;
+  el.__origNextSibling = el.nextSibling;
+  // 逃出 .canvas-wrap 的 backdrop-filter 包含块
+  document.body.appendChild(el);
+  document.body.classList.add("zoom-active");
+  el.classList.add("zoomed");
+  el.__zoomed = true;
+  startEdit(el, b);
+}
+
+function exitZoomed(el) {
+  if (!el || !el.__zoomed) return;
+  el.__zoomed = false;
+  el.classList.remove("zoomed");
+  document.body.classList.remove("zoom-active");
+  // 还原回原父节点的原位置
+  const parent = el.__origParent;
+  const next = el.__origNextSibling;
+  if (parent && el.parentElement === document.body) {
+    if (next && next.parentNode === parent) parent.insertBefore(el, next);
+    else parent.appendChild(el);
+  }
+  el.__origParent = null;
+  el.__origNextSibling = null;
+}
+
+/* 点击放大块以外区域退出放大：CSS 里 body::after 遮罩设了
+   pointer-events: none，所以画布外区域的 click 会落到 body 上。
+   这里补回"点遮罩退出"的手势。事件在文档级冒泡阶段捕获，
+   放大块内部的点击（编辑标题、点按钮）因为 e.target.closest 会命中
+   .block.zoomed 而直接放行。 */
+document.addEventListener("click", e => {
+  if (!document.body.classList.contains("zoom-active")) return;
+  const zoomedEl = document.querySelector(".block.zoomed");
+  if (!zoomedEl) { document.body.classList.remove("zoom-active"); return; }
+  if (e.target.closest(".block.zoomed")) return;
+  // 触发 blur 走正常保存路径，不直接 exitZoomed，避免丢失编辑内容
+  const t = zoomedEl.querySelector(".block-title");
+  if (t && document.activeElement === t) t.blur();
+  else exitZoomed(zoomedEl);
+});
+
 /* ---------- 双击空白新建 ---------- */
 canvas.addEventListener("dblclick", e => {
   if (e.target.closest(".block")) return;
@@ -1392,12 +1699,17 @@ canvas.addEventListener("dblclick", e => {
   const clickX = e.clientX - rect.left;
   const clickY = e.clientY - rect.top;
   const dy = dividerY();
+  // 靠左对齐模式下，双击位置不再决定落点（新块统一追加到栈底）；
+  // 但 API 需要一个合法 y，随便给一个远高 dy 的值，随后 alignPendingBlocks
+  // 会把它排到最下边行——不影响最终视觉位置。
   const x = Math.max(16, Math.round(clickX));
   const y = clickY > dy + 24 ? Math.round(clickY) : Math.round(dy + 34);
   api.createTask(activeFolderId, "", x, y).then(nb => {
     nb.title = ""; // 新建时先显示空内容，直接编辑
     blocks.push(nb);
     renderAll();
+    // 对齐模式下立即把新块塞到栈底，视觉与「输入内容后追加到最下边行」一致
+    if (alignMode && !isStickyFolderActive()) alignPendingBlocks([nb.id]);
     mirrorNow();
     const el = board.querySelector(`.block[data-id="${nb.id}"]`);
     if (el) startEdit(el, nb);
@@ -1438,7 +1750,10 @@ async function createTasksFromPaste(text, clientX, clientY) {
     created.push(nb);
   }
   renderAll();
-  if (alignMode) alignPendingBlocks();
+  // 对齐模式下：把这一批新块全部追加到栈底（旧块保持视觉顺序不动）
+  if (alignMode && !isStickyFolderActive()) {
+    alignPendingBlocks(created.map(x => x.id));
+  }
   mirrorNow();
   toast(lines.length > 1
     ? `已从剪贴板添加 ${lines.length} 个任务`
@@ -1465,6 +1780,9 @@ function startDrag(e, el, b) {
   let elH = 0, boardRect = null, dY = dividerY();
   let xLines = [], yLines = [];
   let lastGuideV = null, lastGuideH = null;
+  /* 跨任务夹移动：记录本轮拖动中最后一次悬停在侧栏任务夹上的 li。
+   * 用 elementFromPoint 探测，非 DnD；释放时若不为 null 就迁过去。 */
+  let _sidebarDropTarget = null;
 
   function beginDrag() {
     started = true;
@@ -1495,6 +1813,16 @@ function startDrag(e, el, b) {
     raf = null;
     if (!latestEv) return;
     const ev = latestEv;
+    // 探测当前光标下是否落在侧栏某个任务夹上（用于跨夹移动的视觉反馈）
+    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+    const li = hit && hit.closest ? hit.closest(".folder-item") : null;
+    if (li !== _sidebarDropTarget) {
+      if (_sidebarDropTarget) _sidebarDropTarget.classList.remove("block-move-target");
+      if (li) li.classList.add("block-move-target");
+      _sidebarDropTarget = li;
+    }
+    // 跨夹移动时不再更新块的 transform，视觉上让块跟随光标由 cursor:grabbing 暗示
+    if (li) return;
     let nx = startLeft + (ev.clientX - originX);
     let ny = startTop + (ev.clientY - originY);
     // 拖动时不做网格磁吸（避免粘滞感），仅保留淡弱的边缘对齐
@@ -1526,19 +1854,36 @@ function startDrag(e, el, b) {
     if (raf === null) raf = requestAnimationFrame(applyFrame);
   };
 
-  const onUp = () => {
+  const onUp = upEv => {
     if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
     window.removeEventListener("pointercancel", onUp);
     if (!started) return;
-    try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+    try { el.releasePointerCapture(upEv.pointerId); } catch (_) {}
     el.classList.remove("dragging");
     canvasWrap.classList.remove("is-dragging");
     document.body.classList.remove("is-dragging");
     el.style.transform = "";
     document.body.style.cursor = "";
     guideV.hidden = true; guideH.hidden = true;
+    /* 跨任务夹迁移：松手时若悬停在另一个任务夹上，直接迁过去。
+     * 不做二次确认——用户可以再拖回来；速度优先。
+     * 注意：先保存 targetId 再清理类，最后置空引用——顺序写反会永远走不进 if 分支。 */
+    if (_sidebarDropTarget) {
+      const targetId = Number(_sidebarDropTarget.dataset.id);
+      const targetLi = _sidebarDropTarget;
+      _sidebarDropTarget = null;
+      targetLi.classList.remove("block-move-target");
+      // 用 elementFromPoint 再确认一次（避免最后一次 move 与 up 之间用户又移开）
+      const finalHit = document.elementFromPoint(upEv.clientX, upEv.clientY);
+      const finalLi = finalHit && finalHit.closest ? finalHit.closest(".folder-item") : null;
+      if (finalLi && Number(finalLi.dataset.id) === targetId) {
+        handleCrossFolderDrop(targetId, el, b);
+      }
+      return;
+    }
+
     const moved = Math.abs(curX - startLeft) > 1 || Math.abs(curY - startTop) > 1;
     if (!moved) return;
     // 就地更新，不复建整块画布，避免释放时闪烁
@@ -1560,6 +1905,14 @@ function startDrag(e, el, b) {
       // 拖回待完成区的块自身坐标也要落盘
       if (!shouldDone) persistBlockPosition(b);
       mirrorNow();
+      // 同步刷新侧栏当前夹的「待完成数量」badge
+      updateFolderCount(activeFolderId);
+      // 处于「靠左对齐」模式下，任何跨区拖动后都强制重排：
+      //   · 从 done 拖回 pending（!shouldDone）：本块是新加入的，追加到最下边行
+      //   · 从 pending 拖到 done：本块离开，其他块保持原顺序重排
+      if (alignMode && !isStickyFolderActive()) {
+        alignPendingBlocks(!shouldDone ? [b.id] : []);
+      }
     } else {
       // 状态没变：在当前区域内移动
       if (b.done) {
@@ -1573,6 +1926,8 @@ function startDrag(e, el, b) {
         encodePos(el, b);
         // 重叠合并检测：拖到其他块上方时合并内容
         checkAndMerge(b, el);
+        // 对齐模式下：pending 块被拖动会打乱堆栈，立即按 y 升序重排回堆栈
+        if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
       }
       mirrorNow();
     }
@@ -1637,7 +1992,12 @@ function checkAndMerge(b, el) {
   el.remove();
   if (b.id === selectedBlockId) clearSelection();
   relayout(false);
+  // 对齐模式下：一个 pending 块被移除，剩余 pending 块按当前 y 升序重新堆栈；
+  // 目标块内容变了但 id 不变，走「纯重排」路径（[]），不追加到底部。
+  if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
   mirrorNow();
+  // 同步刷新侧栏当前夹的「待完成数量」badge（被合并的块从 pending 里消失）
+  updateFolderCount(activeFolderId);
 }
 
 function showMergeHint(el) {
@@ -1704,6 +2064,14 @@ function toggleDone(id) {
   relayout(false);
   persistAllDonePositions();
   mirrorNow();
+  // 勾选后如果处于「靠左对齐」模式，把待完成区重新堆栈：
+  //   · 从已完成勾回待完成（!b.done）——本块重新加入 pending，追加到最下边行
+  //   · 从待完成勾到已完成（b.done）——本块离开，其他 pending 块保持原顺序重排
+  if (alignMode && !isStickyFolderActive()) {
+    alignPendingBlocks(!b.done ? [b.id] : []);
+  }
+  // 同步刷新侧栏当前夹的「待完成数量」badge
+  updateFolderCount(activeFolderId);
 }
 function removeBlock(id) {
   blocks = blocks.filter(b => b.id !== id);
@@ -1712,7 +2080,11 @@ function removeBlock(id) {
   if (el) el.remove();
   if (id === selectedBlockId) clearSelection();
   relayout(false);
+  // 对齐模式下：删除一个 pending 块后，剩余 pending 块按当前 y 升序重新堆栈
+  if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
   mirrorNow();
+  // 同步刷新侧栏当前夹的「待完成数量」badge
+  updateFolderCount(activeFolderId);
 }
 async function removeFolder(id) {
   const f = folders.find(x => x.id === id);
@@ -2068,11 +2440,14 @@ async function selectFolder(id) {
   // 覆盖写到新文件夹的记录里，导致切过去仍停在旧文件夹的位置。
   saveScroll();
   activeFolderId = id;
-  alignMode = false;
+  // 每个文件夹独立记忆「靠左对齐」开关，切夹时按新夹的偏好恢复；
+  // 不再强制关掉——否则勾选对齐后随便切一下文件夹，对齐就失效了。
+  alignMode = getAlignMode(id);
   savedPositions = {};
-  alignToggle.checked = false;
+  alignToggle.checked = alignMode;
   await reloadTasks();
   renderAll();
+  if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
 }
 async function reloadTasks() {
   if (!activeFolderId) { blocks = []; return; }
@@ -2331,12 +2706,22 @@ async function boot() {
   await ensureStickyFolder();
   await reloadTasks();
   await restoreFromMirror();
+  // 应用「靠左对齐」的持久化偏好（按文件夹）；
+  // 放在 renderAll 之前，renderAll 内部走的是 relayout，
+  // 而 renderAll 后我们再用 alignPendingBlocks([]) 强制对齐一次，
+  // 保证从磁盘加载回来的旧块也重新堆栈。
+  alignMode = activeFolderId ? getAlignMode(activeFolderId) : false;
+  alignToggle.checked = alignMode;
   renderAll();
+  // 首次进入时如开启了对齐，立即对齐已有块。走「纯重排」路径（[]），
+  // 保留用户上次手动对齐时的视觉顺序，不做「追加到栈底」的重排。
+  if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
   // 绑定速记夹按钮
   bindStickyEvents();
   alignToggle.addEventListener("change", () => {
     alignMode = alignToggle.checked;
-    if (alignMode) alignPendingBlocks();
+    if (activeFolderId) saveAlignMode(activeFolderId, alignMode);
+    if (alignMode) alignPendingBlocks([]);
     else restorePendingBlocks();
   });
   // 冷启动检查更新：延后 1.5s，避免与初始化抢带宽；用户关掉自动检查则跳过

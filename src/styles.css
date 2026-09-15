@@ -37,6 +37,10 @@ body {
   color: var(--text);
   background: #f5f5f7;
   overflow: hidden;
+  /* isolation 让 body 成为一个独立堆叠上下文：
+     这样 .zoom-backdrop 用 z-index:-1 时不会飘到 body 背景之下消失，
+     而是稳定地落在 body 背景与 .app 之间。 */
+  isolation: isolate;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: -0.01em;
@@ -182,6 +186,16 @@ body.is-dragging .bg::after { opacity: 0; }
   box-shadow: inset 0 0 0 2px var(--accent), var(--sh-sm);
   background: rgba(255, 255, 255, 0.92);
 }
+/* 便签块跨夹移动：目标任务夹的高亮（虚线，区别于重排实线） */
+.folder-item.block-move-target {
+  box-shadow: inset 0 0 0 2px var(--accent), var(--sh-sm);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.82));
+  animation: block-move-pulse 1.1s ease-in-out infinite;
+}
+@keyframes block-move-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 2px var(--accent), var(--sh-sm); }
+  50% { box-shadow: inset 0 0 0 2.5px var(--accent), 0 0 0 3px var(--accent-soft), var(--sh-sm); }
+}
 .folder-list.reordering { user-select: none; }
 .folder-item .drag-handle {
   flex: none; width: 12px; color: var(--faint);
@@ -282,7 +296,10 @@ body.is-dragging .bg::after { opacity: 0; }
 /* ---------- 任务块 ---------- */
 .block {
   position: absolute; min-width: 180px; max-width: 510px;
-  padding: 12px 34px 12px 15px; border-radius: var(--radius-sm);
+  /* 右侧 34px：给右上的删除/勾选按钮留位；
+     底部 32px：给右下的放大编辑按钮留位（8 边距 + 22 按钮 + 2 余量），
+     避免放大按钮和内容最后一行文字重叠。 */
+  padding: 12px 34px 32px 15px; border-radius: var(--radius-sm);
   background: var(--glass-card);
   border: 1px solid var(--glass-border);
   backdrop-filter: blur(var(--blur-card)) saturate(170%);
@@ -329,22 +346,116 @@ body.is-dragging .bg::after { opacity: 0; }
 .block.row .block-meta { margin-top: 0; }
 .block.align-anim { transition: left 0.28s var(--ease), top 0.28s var(--ease); }
 
-/* 普通（非便利贴、非列表）块：padding-top 加大到 32，让 × 按钮（top:7 h:22，
-   占 7~29 纵区）与标题首行（从 32 起）在纵向上不重叠；padding-right 44 保证
-   第一行长文字不会撞到右上角 × */
-.block:not(.sticky):not(.row) {
-  padding-top: 32px;
-  padding-right: 44px;
-}
-
 .block-title {
   font-size: 14px; line-height: 1.55; word-break: break-word; white-space: pre-wrap;
-  outline: none; min-height: 22px; user-select: none; -webkit-user-drag: none;
+  outline: none; min-height: 22px; user-select: none;
   letter-spacing: -0.005em; color: var(--text-strong);
+  /* 右上角预留 56px 的按钮安全区：
+     - del 按钮 right:31 + 22 宽 = 占位到 right:53（约 56px）
+     - check 按钮 right:10 + 19 宽 = 占位到 right:29（在 56px 范围内）
+     这样标题文字不会跑到右上按钮下面。
+     底部 zoom 按钮由 .block 的 padding-bottom: 32px 已经隔开，
+     不需要在 title 上再加 padding-bottom。 */
+  padding-right: 56px;
 }
+/* 便利贴夹（Grid 布局）由 .sticky-title 管理右安全区，这里复位
+   避免双层 padding 让内容缩得过窄 */
+.block.sticky .block-title { padding-right: 0; }
+/* 单行紧凑布局 .row 已有自己的 padding-right:44，title 不再叠加 */
+.block.row .block-title { padding-right: 0; }
+/* 便利贴夹：标题需要能被「选中并拖起」作为拖拽源。
+   上面的 user-select: none + 全局 body user-select: none 会让 WebView2/Chromium
+   把 mousedown 当成「选文本」处理，draggable="true" 的 dragstart 就根本不触发
+   ——表现为「点住不动、拖不动」。这里在便利贴场景下解除，让拖拽正常启动。
+   配合 -webkit-user-drag: element，浏览器会把「整个便利贴」作为拖拽图像，
+   而不是「被选中的文字片段」，视觉更干净。 */
+.block.sticky .block-title { user-select: text; -webkit-user-drag: none; }
+.block.sticky .sticky-title { user-select: text; -webkit-user-drag: none; }
+.block.sticky .block-meta { user-select: text; -webkit-user-drag: none; }
+.block.sticky { -webkit-user-drag: element; }
 .block-title:focus { cursor: var(--cursor-text); }
 .block.editing .block-title { user-select: text; }
 .block-title:empty::before { content: "输入任务…"; color: var(--faint); }
+
+/* 放大编辑按钮：hover 时出现在右下角，点击后把块「放大」到画布视口，
+   编辑完毕后（blur）自动恢复原始尺寸。放在右下避免与右上删除/勾选按钮冲突。
+   按钮尺寸 24×24，配合 .block 底部 32px 的 padding，让按钮区域
+   和输入内容之间有一个专属的下留白带，不会重叠。 */
+.block-zoom {
+  position: absolute; bottom: 6px; right: 8px;
+  width: 24px; height: 24px; padding: 0;
+  border-radius: 6px;
+  border: none; background: transparent; color: var(--faint);
+  cursor: var(--cursor-arrow);
+  font-size: 14px; line-height: 1; opacity: 0;
+  transition: all 0.18s var(--ease);
+  display: grid; place-items: center;
+  box-sizing: border-box;
+}
+.block:hover .block-zoom { opacity: 1; }
+.block-zoom:hover { color: #fff; background: var(--accent); }
+body.show-card-actions .block-zoom { opacity: 1; }
+
+/* 放大态：脱离原绝对定位，改成 fixed 覆盖到 canvas 视口；
+   尺寸撑到视口 90%，四边等距留白。用 !important 盖过 autoSize 写入的
+   el.style.minWidth / el.style.maxWidth 内联样式。
+   用 inset: 5vh 5vw（top/bottom 各 5vh，left/right 各 5vw）而不是
+   left + width 组合，理由：
+     1. position:fixed 时宽高由四边位置自动算出，不受滚动条宽度影响，
+        保证几何居中；left:5vw + width:90vw 组合在出现滚动条时会有
+        ~15px 的视觉偏移。
+     2. vw/vh 而不是 % 是因为 .app 上有 padding 和 gap，% 可能参照到
+        错误包含块；这里明确用视口单位。
+   对非便利贴、非 row 布局的普通任务块生效。 */
+.block.zoomed {
+  position: fixed !important;
+  inset: 5vh 5vw !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  box-sizing: border-box !important;
+  padding: 40px 48px !important;
+  margin: 0 !important;
+  z-index: 100;
+  overflow: auto;
+  animation: zoomIn 0.22s var(--ease-out) both;
+  box-shadow: 0 30px 80px rgba(16, 24, 48, 0.35), inset 0 1px 0 rgba(255,255,255,1);
+}
+.block.zoomed .block-title {
+  font-size: 18px;
+  line-height: 1.75;
+  min-height: 60px;
+}
+.block.zoomed .block-del,
+.block.zoomed .block-zoom,
+.block.zoomed .block-check {
+  opacity: 1;
+}
+@keyframes zoomIn {
+  from { opacity: 0; transform: scale(0.94); }
+  to   { opacity: 1; transform: scale(1); }
+}
+/* 画布背景遮罩：点击画布外区域退出放大（blur 走同一出口）。
+   用 body 的 ::after 伪元素实现，避免 JS 创建 DOM 节点。
+   body { isolation: isolate } 让 body 建立独立堆叠上下文，
+   这样 ::after 用 z-index:-1 时不会飘到 body 背景之下消失，
+   而是稳定地落在 body 背景与 .app 之间。
+   .app 的 z-index:1 高于 -1，因此 .app 及其内部的 .block.zoomed
+   始终在遮罩之上；遮罩只会盖住 .app 之外的 body 空白区域——
+   也就是那四周边缘的窄条（放大块占 90vw×90vh）。
+   0.5 的黑度 + blur(4px) 让灰雾感足够明显，否则在纯白背景上
+   肉眼几乎察觉不到，用户就无法感知"我在放大编辑"。 */
+body.zoom-active::after {
+  content: ""; position: fixed; inset: 0; z-index: -1;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  animation: fadeIn 0.22s var(--ease-out) both;
+  pointer-events: none;
+}
 
 .block-meta {
   font-size: 10.5px; color: var(--faint); margin-top: 5px; user-select: none;
@@ -750,10 +861,7 @@ body { cursor: var(--cursor-arrow); }
   position: relative !important;
   top: auto !important; left: auto !important;
   min-width: 0 !important; max-width: none !important; width: auto !important;
-  /* padding-top 加大让 × 按钮占据独立一行（按钮 top:8 h:22 → 底部 30px），
-     标题/正文从 padding-top 32px 开始，永远不与 × 在纵向上重叠；
-     padding-right 44px 保持文字右边留白，避免第一行长文字撞到右上角 × */
-  padding: 32px 44px 14px 15px;
+  padding: 14px 40px 12px 15px;
   background: var(--sticky-bg, #fff9c4);
   border: none;
   box-shadow:
@@ -761,6 +869,12 @@ body { cursor: var(--cursor-arrow); }
     0 8px 18px rgba(0,0,0,0.06),
     inset 0 1px 0 rgba(255,255,255,0.4);
   cursor: grab;
+  /* 关键：清除 .block 上的 `animation: blockIn .3s both`。
+     `both` = forwards+backwards，动画结束后的 `to { transform: translateZ(0) scale(1) }`
+     会被永久锁定，直接把下面这行的 rotate(var(--rot)) 盖掉，
+     导致便利贴墙看起来「没旋转」（实测 computed.transform 恒等于矩阵 (1,0,0,1,0,0)）。
+     便利贴本来在 Grid 里入场，也不需那个淡入动画。 */
+  animation: none;
   transform: rotate(var(--rot, 0deg));
   transition: box-shadow 0.2s var(--ease), transform 0.25s var(--ease);
   z-index: 2;
