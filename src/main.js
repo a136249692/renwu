@@ -558,6 +558,9 @@ function stickyRotation(id) {
 let _dragFolderId = null;   // 正在拖动的文件夹 id
 let _dragLastX = null;      // 拖拽最后一次的鼠标 X 坐标（用于决定插入到目标之前/之后）
 let _dragLastY = null;      // 拖拽最后一次的鼠标 Y 坐标
+/* 任务夹 pointer 排序的私有状态（与 _dragFolderId 区分：后者保留给便签块跨夹） */
+let _foldDragSrc = null;
+let _foldDragSuppressed = false;
 
 /* ---------- 工具 ---------- */
 function fmtTime(ts) {
@@ -753,6 +756,7 @@ function renderFolders() {
     if (pendingCount > 0) li.querySelector(".cnt").textContent = String(pendingCount);
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
+      if (_foldDragSuppressed) { _foldDragSuppressed = false; return; }
       selectFolder(f.id);
     });
     if (!locked) {
@@ -773,24 +777,14 @@ function renderFolders() {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
       openModal("rename", f);
     });
-    // 拖动排序：只有非速记夹可以拖动（作为拖源）
+    // 拖动排序：只有非速记夹可以拖动（作为拖源）。
+    // 用 pointerdown+pointermove+pointerup 实现，不用 HTML5 DnD——后者在打包后
+    // Windows WebView2 里对侧栏 li 作为拖源不稳定（浏览器预览正常）。
     if (!locked) {
-      li.addEventListener("dragstart", e => {
-        if (e.target.closest(".rm") || e.target.closest(".star-btn")) { e.preventDefault(); return; }
-        _dragFolderId = f.id;
-        _dragLastX = e.clientX;
-        _dragLastY = e.clientY;
-        li.classList.add("dragging");
-        folderListEl.classList.add("reordering");
-        try { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", String(f.id)); } catch (_) {}
-      });
-      li.addEventListener("dragend", () => {
-        li.classList.remove("dragging");
-        folderListEl.classList.remove("reordering");
-        folderListEl.querySelectorAll(".drag-over").forEach(x => x.classList.remove("drag-over"));
-        _dragFolderId = null;
-        _dragLastX = null;
-        _dragLastY = null;
+      li.addEventListener("pointerdown", e => {
+        if (e.button !== 0) return;
+        if (e.target.closest(".rm") || e.target.closest(".star-btn")) return;
+        startFolderPointerDrag(e, f.id, li);
       });
     }
     // 拖入目标：所有任务夹都可以作为 drop target（含速记夹），
@@ -920,6 +914,83 @@ function reorderFolders(srcId, targetId) {
   folders.forEach((f, i) => { if (!isStickyFolder(f)) map[String(f.id)] = i; });
   saveFolderOrderMap(map);
   renderFolders();
+}
+
+/* 任务夹 pointer 排序：用 pointerdown+setPointerCapture+window pointermove/pointerup，
+   替代 HTML5 DnD。HTML5 DnD 在 WebView2 打包后侧栏 li 作为拖源不稳定；
+   pointer 模式跟普通块 startDrag 一致，跨夹移动那块也证明它在 WebView2 里稳定。
+   交互细节：
+   - 拖动前 4px 阈值内不当拖动，仅当 pointermove 超过阈值才激活拖拽视觉；
+   - 移动时用 elementFromPoint 命中最近的 .folder-item，按鼠标相对中线挂
+     fold-drop-before / fold-drop-after class 显示插入指示线；
+   - 松手时按当前 hover 目标调用 reorderFolders(srcId, targetId, before?)。 */
+function startFolderPointerDrag(e, srcId, srcEl) {
+  if (_foldDragSrc != null) return;
+  e.preventDefault();
+  const startX = e.clientX, startY = e.clientY;
+  const startElt = e.target;
+  const startElRect = srcEl.getBoundingClientRect();
+  let activated = false;
+
+  try { startElt.setPointerCapture(e.pointerId); } catch (_) {}
+
+  const onMove = (ev) => {
+    const dx = ev.clientX - startX, dy = ev.clientY - startY;
+    if (!activated) {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      activated = true;
+      _foldDragSrc = srcId;
+      _foldDragSrcEl = srcEl;
+      srcEl.classList.add("fold-dragging");
+      folderListEl.classList.add("reordering");
+      _dragLastX = ev.clientX;
+      _dragLastY = ev.clientY;
+    }
+    ev.preventDefault();
+    _dragLastX = ev.clientX;
+    _dragLastY = ev.clientY;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tgt = el ? el.classList.contains("folder-item") ? el : el.closest(".folder-item") : null;
+    folderListEl.querySelectorAll(".fold-drop-before,.fold-drop-after").forEach(x => {
+      x.classList.remove("fold-drop-before"); x.classList.remove("fold-drop-after");
+    });
+    if (!tgt || Number(tgt.dataset.id) === Number(srcId)) return;
+    if (tgt.classList.contains("locked")) return;
+    const r = tgt.getBoundingClientRect();
+    const isVertical = getComputedStyle(folderListEl).flexDirection !== "row";
+    const pastMid = isVertical
+      ? (ev.clientY > r.top + r.height / 2)
+      : (ev.clientX > r.left + r.width / 2);
+    tgt.classList.add(pastMid ? "fold-drop-after" : "fold-drop-before");
+  };
+
+  const onUp = (ev) => {
+    try { startElt.releasePointerCapture(e.pointerId); } catch (_) {}
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tgt = activated && el ? (el.classList.contains("folder-item") ? el : el.closest(".folder-item")) : null;
+    const tgtId = tgt ? Number(tgt.dataset.id) : null;
+    const wasDragging = activated;
+    srcEl.classList.remove("fold-dragging");
+    folderListEl.classList.remove("reordering");
+    folderListEl.querySelectorAll(".fold-drop-before,.fold-drop-after").forEach(x => {
+      x.classList.remove("fold-drop-before"); x.classList.remove("fold-drop-after");
+    });
+    _foldDragSrc = null;
+    _foldDragSrcEl = null;
+    _foldDragMoveHandler = null;
+    _foldDragUpHandler = null;
+    if (wasDragging) {
+      _foldDragSuppressed = true;
+      if (tgtId != null && tgtId !== Number(srcId)) reorderFolders(srcId, tgtId);
+    }
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 }
 
 /* ---------- 渲染画布（协调式：新增才建，多余才删） ---------- */

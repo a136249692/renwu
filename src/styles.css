@@ -197,6 +197,10 @@ body.is-dragging .bg::after { opacity: 0; }
   50% { box-shadow: inset 0 0 0 2.5px var(--accent), 0 0 0 3px var(--accent-soft), var(--sh-sm); }
 }
 .folder-list.reordering { user-select: none; }
+/* pointer-based 排序中的任务夹：本体半透明 + 显示插入位置的上/下边框指示 */
+.folder-item.fold-dragging { opacity: 0.4; }
+.folder-item.fold-drop-before::before { content: ""; position: absolute; left: 0; right: 0; top: -1px; height: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
+.folder-item.fold-drop-after::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
 .folder-item .drag-handle {
   flex: none; width: 12px; color: var(--faint);
   font-size: 12px; line-height: 1; text-align: center;
