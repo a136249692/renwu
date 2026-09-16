@@ -555,12 +555,12 @@ function stickyRotation(id) {
 }
 
 /* ---------- 文件夹拖动排序状态 ---------- */
-let _dragFolderId = null;   // 正在拖动的文件夹 id
 let _dragLastX = null;      // 拖拽最后一次的鼠标 X 坐标（用于决定插入到目标之前/之后）
 let _dragLastY = null;      // 拖拽最后一次的鼠标 Y 坐标
-/* 任务夹 pointer 排序的私有状态（与 _dragFolderId 区分：后者保留给便签块跨夹） */
-let _foldDragSrc = null;
-let _foldDragSuppressed = false;
+/* 任务夹 pointer 排序的私有状态 */
+let _foldDragSrc = null;    // 正在拖动的任务夹 id（null 表示未在拖动）
+let _foldDragSrcEl = null;  // 正在拖动的 li 元素
+let _foldDragSuppressed = false;  // 拖动结束后抑制紧随的 click 事件
 
 /* ---------- 工具 ---------- */
 function fmtTime(ts) {
@@ -687,6 +687,39 @@ function alignPendingBlocks(appendIds) {
   const originalVpH = canvas.clientHeight;
   board.style.height = Math.max(maxY + CANVAS_BOTTOM_PAD, originalVpH) + "px";
   setTimeout(() => els.forEach(el => el && el.classList.remove("align-anim")), 340);
+  // 新建/跨夹迁入场景（appendIds 非空）：滚动条自动定位到新增块的最后一块，
+  // 让「输入内容后追加到最下边行」真的可见；其它调用（勾选、切换、勾选对齐、
+  // 拖动后重排等）不传 appendIds，保持用户当前滚动位置不动。
+  if (appendIds && appendIds.length) scrollToBlocks(appendIds);
+}
+
+/* 把滚动条定位到 appendIds 中最后一个可见的块，使其刚好落在画布视口下部。
+   使用 requestAnimationFrame 等布局写完；smooth 与 align-anim 的 340ms 动画节奏
+   保持一致，视觉更连贯。找不到可见块（例如被 zoom 或已删除）时静默跳过。 */
+function scrollToBlocks(ids) {
+  const valid = ids.filter(id => id != null);
+  if (!valid.length) return;
+  requestAnimationFrame(() => {
+    let target = null;
+    for (let i = valid.length - 1; i >= 0; i--) {
+      const el = board.querySelector(`.block[data-id="${valid[i]}"]`);
+      // 跳过 zoom 态：它用 position:fixed，getBoundingClientRect 返回视口坐标
+      // 而不是 board 内的坐标，会算出错误的 scrollTop
+      if (el && el.offsetHeight > 0 && !el.classList.contains("zoomed")) { target = el; break; }
+    }
+    if (!target) return;
+    const canvasRect = canvas.getBoundingClientRect();
+    const elRect = target.getBoundingClientRect();
+    const elTopInCanvas = elRect.top - canvasRect.top + canvas.scrollTop;
+    const elBottomInCanvas = elTopInCanvas + elRect.height;
+    const vpH = canvas.clientHeight;
+    const MARGIN = 60; // 让新块停留在视口下沿上方 60px 处，既可见又不贴底
+    let scrollTop = elBottomInCanvas - vpH + MARGIN;
+    if (scrollTop < 0) scrollTop = 0;
+    // 目标块已经完整落在视口内，就不必滚动
+    if (elBottomInCanvas <= canvas.scrollTop + vpH && elTopInCanvas >= canvas.scrollTop) return;
+    canvas.scrollTo({ top: scrollTop, behavior: "smooth" });
+  });
 }
 
 function restorePendingBlocks() {
@@ -732,9 +765,15 @@ function renderFolders() {
     const locked = isStickyFolder(f);
     const isDefault = f.id === defId;
     const li = document.createElement("li");
-    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "") + (locked ? " locked" : "") + (locked ? "" : " draggable");
+    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "") + (locked ? " locked" : "");
     li.dataset.id = f.id;
-    if (!locked) li.setAttribute("draggable", "true");
+    // 关键：任务夹 li 永远不设 draggable="true"。
+    // draggable=true 会让 WebView2 在 pointerdown+move 后启动 HTML5 DnD，
+    // 接管事件流——window 上的 pointermove/pointerup 不再触发，
+    // startFolderPointerDrag 走不到 onUp，排序永远不生效。
+    // 作为拖目标（便签跨夹移动 drop 到侧栏）不依赖这个属性，
+    // dragover/drop 事件在 draggable=false 的元素上同样可以收到。
+    li.setAttribute("draggable", "false");
     const starHtml = isDefault
       ? '<span class="default-badge" title="默认任务夹：每次打开应用都会先显示此夹">默认</span>'
       : '<button class="star-btn" title="设为默认任务夹">☆</button>';
@@ -788,24 +827,14 @@ function renderFolders() {
       });
     }
     // 拖入目标：所有任务夹都可以作为 drop target（含速记夹），
-    // 用来接收从便签墙 HTML5 DnD 拖过来的块
+    // 用来接收从便签墙 HTML5 DnD 拖过来的便签块（速记夹专用）。
+    // 文件夹之间的重排走 pointer events（startFolderPointerDrag），不走这里。
     li.addEventListener("dragover", e => {
-      // 文件夹重排：只有正在拖文件夹时才算
-      if (_dragFolderId !== null) {
-        e.preventDefault();
-        _dragLastX = e.clientX;
-        _dragLastY = e.clientY;
-        if (li.dataset.id !== String(_dragFolderId)) li.classList.add("drag-over");
-        else li.classList.remove("drag-over");
-        return;
-      }
-      // 便签块跨夹移动：仅在正从便签墙拖便签块时算
-      if (_stickyDragEl) {
-        e.preventDefault();
-        try { e.dataTransfer.dropEffect = "move"; } catch (_) {}
-        if (li.dataset.id !== String(activeFolderId)) li.classList.add("block-move-target");
-        else li.classList.remove("block-move-target");
-      }
+      if (!_stickyDragEl) return;
+      e.preventDefault();
+      try { e.dataTransfer.dropEffect = "move"; } catch (_) {}
+      if (li.dataset.id !== String(activeFolderId)) li.classList.add("block-move-target");
+      else li.classList.remove("block-move-target");
     });
     li.addEventListener("dragleave", () => {
       li.classList.remove("drag-over");
@@ -815,24 +844,16 @@ function renderFolders() {
       e.preventDefault();
       li.classList.remove("drag-over");
       li.classList.remove("block-move-target");
-      // 便签块跨夹移动
-      if (_stickyDragEl) {
-        const dragEl = _stickyDragEl;
-        const dragId = Number(dragEl.dataset.id);
-        const targetId = Number(li.dataset.id);
-        _stickyDragEl = null;
-        dragEl.classList.remove("block-dragging");
-        board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => n.classList.remove("block-drop-target"));
-        if (targetId === Number(activeFolderId)) return;
-        const b = blocks.find(x => x.id === dragId);
-        if (b) handleCrossFolderDrop(targetId, dragEl, b);
-        return;
-      }
-      // 文件夹重排
-      if (_dragFolderId === null) return;
+      if (!_stickyDragEl) return;
+      const dragEl = _stickyDragEl;
+      const dragId = Number(dragEl.dataset.id);
       const targetId = Number(li.dataset.id);
-      if (targetId === _dragFolderId) return;
-      reorderFolders(_dragFolderId, targetId);
+      _stickyDragEl = null;
+      dragEl.classList.remove("block-dragging");
+      board.querySelectorAll(".block.sticky.block-drop-target").forEach(n => n.classList.remove("block-drop-target"));
+      if (targetId === Number(activeFolderId)) return;
+      const b = blocks.find(x => x.id === dragId);
+      if (b) handleCrossFolderDrop(targetId, dragEl, b);
     });
     folderListEl.appendChild(li);
   });
@@ -889,29 +910,45 @@ function updateFolderCount(folderId) {
 
 /* 拖动文件夹到目标文件夹位置：把源元素插到目标之前/之后。
    以鼠标落点相对目标元素的中线决定插入到目标之前还是之后；
-   自动适配纵向列表（用 Y）和移动端横向列表（用 X）。 */
+   自动适配纵向列表（用 Y）和移动端横向列表（用 X）。
+
+   关键：orderMap 是唯一可信的顺序来源。以前从 folders 数组上 splice 是错的，
+   因为 api.getFolders() 从 SQLite 拉回时按 created_at ASC 排序，跟 orderMap 里的
+   视觉顺序完全不一致——第一次拖动看起来 OK，第二次就乱了。这里改成：
+   1) 从当前 DOM 读取可见顺序（DOM 就是 renderFolders 刚渲染出来的，最权威）；
+   2) 按视觉顺序重排 orderMap，让 index 0..n-1 连续；
+   3) 不再动 folders 数组（它是 DB 原始顺序，不动它更安全）。 */
 function reorderFolders(srcId, targetId) {
-  const srcIdx = folders.findIndex(f => f.id === srcId);
-  const tgtIdx = folders.findIndex(f => f.id === targetId);
+  // 用 DOM 中的当前顺序作为基准（sticky 夹永远在最前，跳过它们）
+  const items = Array.from(folderListEl.querySelectorAll(".folder-item"))
+    .filter(li => !li.classList.contains("locked"))
+    .map(li => Number(li.dataset.id));
+  const srcIdx = items.indexOf(srcId);
+  const tgtIdx = items.indexOf(targetId);
   if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
-  const src = folders.splice(srcIdx, 1)[0];
-  // 移除 src 后目标位置可能左移一位；重新定位
-  let insertAt = folders.findIndex(f => f.id === targetId);
-  if (insertAt < 0) { folders.splice(srcIdx, 0, src); return; }
+
+  // 判断落点在目标上方还是下方
   const tgtEl = folderListEl.querySelector(`li[data-id="${targetId}"]`);
+  let pastMid = false;
   if (tgtEl) {
     const r = tgtEl.getBoundingClientRect();
-    // 检测列表布局方向（自适应移动端横向布局）
     const isVertical = getComputedStyle(folderListEl).flexDirection !== "row";
-    const pastMid = isVertical
+    pastMid = isVertical
       ? (_dragLastY != null && _dragLastY > r.top + r.height / 2)
       : (_dragLastX != null && _dragLastX > r.left + r.width / 2);
-    if (pastMid) insertAt = insertAt + 1;
   }
-  folders.splice(insertAt, 0, src);
-  // 持久化顺序（只记录非速记夹）
+
+  // 从 items 移除源
+  items.splice(srcIdx, 1);
+  // 重新定位目标在新数组中的下标（因为移除后可能左移）
+  let insertAt = items.indexOf(targetId);
+  if (insertAt < 0) return;
+  if (pastMid) insertAt += 1;
+  items.splice(insertAt, 0, srcId);
+
+  // 写回 orderMap：让非速记夹的 index 从 0 连续递增
   const map = {};
-  folders.forEach((f, i) => { if (!isStickyFolder(f)) map[String(f.id)] = i; });
+  items.forEach((id, i) => { map[String(id)] = i; });
   saveFolderOrderMap(map);
   renderFolders();
 }
@@ -980,8 +1017,6 @@ function startFolderPointerDrag(e, srcId, srcEl) {
     });
     _foldDragSrc = null;
     _foldDragSrcEl = null;
-    _foldDragMoveHandler = null;
-    _foldDragUpHandler = null;
     if (wasDragging) {
       _foldDragSuppressed = true;
       if (tgtId != null && tgtId !== Number(srcId)) reorderFolders(srcId, tgtId);
@@ -2409,10 +2444,10 @@ function openUpdateModal(update, onProgress) {
   $("update-cancel").hidden = false;
   $("update-install").hidden = false;
   $("update-install").textContent = "下载并安装";
-  // 未购买代码签名证书，Windows 首次打开 exe 时会弹 SmartScreen 「打开前请确保信任此应用」。
-  // 这里在弹窗内前置说明，避免用户以为是病毒而中止安装；macOS/Linux 没有该警告，隐藏。
+  // SmartScreen 说明不再显示：以前因为没买代码签名证书会弹这条提示，现在改走
+  // CNB 直链 + 已签名发布资产，不再需要 UI 层解释。DOM 保留以便回滚。
   const ss = $("update-smartscreen");
-  if (ss) ss.hidden = !/Windows/.test(navigator.userAgent);
+  if (ss) ss.hidden = true;
   m.hidden = false;
   // 下载进度回调：onEvent({event:'Started'|'Progress'|'Finished', data:{contentLength?|chunkLength}})
   let total = 0, done = 0;
