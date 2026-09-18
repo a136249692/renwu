@@ -34,7 +34,20 @@ pub fn run() {
             get_calendar_tasks,
             set_calendar_date,
             get_task_history,
-            save_task_history
+            save_task_history,
+            list_mindmaps,
+            create_mindmap,
+            rename_mindmap,
+            update_mindmap_view,
+            delete_mindmap,
+            list_mindmap_nodes,
+            create_mindmap_node,
+            update_mindmap_node_content,
+            update_mindmap_node_position,
+            delete_mindmap_node,
+            list_mindmap_edges,
+            add_mindmap_edge,
+            delete_mindmap_edge
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -180,4 +193,88 @@ fn save_task_history(
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::save_task_history(&conn, task_id, &old_content, &new_content, &change_type)
+}
+
+#[tauri::command]
+fn list_mindmaps(state: DbState) -> Result<Vec<db::Mindmap>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_mindmaps(&conn)
+}
+
+#[tauri::command]
+fn create_mindmap(state: DbState, name: String) -> Result<db::Mindmap, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::create_mindmap(&conn, &name)
+}
+
+#[tauri::command]
+fn rename_mindmap(state: DbState, id: i64, name: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::rename_mindmap(&conn, id, &name)
+}
+
+#[tauri::command]
+fn update_mindmap_view(state: DbState, id: i64, pan_x: f64, pan_y: f64, zoom: f64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_mindmap_view(&conn, id, pan_x, pan_y, zoom)
+}
+
+#[tauri::command]
+fn delete_mindmap(state: DbState, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::delete_mindmap(&conn, id)
+}
+
+#[tauri::command]
+fn list_mindmap_nodes(state: DbState, map_id: i64) -> Result<Vec<db::MindmapNode>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_mindmap_nodes(&conn, map_id)
+}
+
+#[tauri::command]
+fn create_mindmap_node(
+    state: DbState,
+    map_id: i64,
+    content: String,
+    x: f64,
+    y: f64,
+) -> Result<db::MindmapNode, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::create_mindmap_node(&conn, map_id, &content, x, y)
+}
+
+#[tauri::command]
+fn update_mindmap_node_content(state: DbState, id: i64, content: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_mindmap_node_content(&conn, id, &content)
+}
+
+#[tauri::command]
+fn update_mindmap_node_position(state: DbState, id: i64, x: f64, y: f64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_mindmap_node_position(&conn, id, x, y)
+}
+
+#[tauri::command]
+fn delete_mindmap_node(state: DbState, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::delete_mindmap_node(&conn, id)
+}
+
+#[tauri::command]
+fn list_mindmap_edges(state: DbState, map_id: i64) -> Result<Vec<db::MindmapEdge>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_mindmap_edges(&conn, map_id)
+}
+
+#[tauri::command]
+fn add_mindmap_edge(state: DbState, map_id: i64, from_id: i64, to_id: i64) -> Result<db::MindmapEdge, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::add_mindmap_edge(&conn, map_id, from_id, to_id)
+}
+
+#[tauri::command]
+fn delete_mindmap_edge(state: DbState, id: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::delete_mindmap_edge(&conn, id)
 }

@@ -19,23 +19,30 @@
       <aside class="sidebar glass">
         <div class="brand">
           <div class="logo">✦</div>
-          <div>
+          <div class="brand-text">
             <h1 id="brand-title" class="brand-title" title="双击可重命名">玻光画布</h1>
             <small>自由摆放 · 本地保存</small>
           </div>
+          <button id="settings-btn" title="设置">⚙</button>
         </div>
         <button class="new-folder-btn" id="new-folder-btn">＋ 新建任务夹</button>
         <ul class="folder-list" id="folder-list"></ul>
+        <div class="mode-body" id="mode-body-mind" hidden>
+          <button class="new-folder-btn" id="new-map-btn">＋ 新建思维导图</button>
+          <ul class="folder-list" id="map-list"></ul>
+        </div>
         <div class="side-foot">
-          <button id="export-btn">导出</button>
-          <button id="import-btn">导入</button>
-          <button id="settings-btn" title="设置">⚙</button>
+          <div class="mode-tabs" id="mode-tabs" role="tablist" title="切换：任务 / 思维">
+            <button class="mode-tab active" id="tab-tasks" role="tab" aria-selected="true" data-mode="tasks">📋 任务</button>
+            <button class="mode-tab" id="tab-mind" role="tab" aria-selected="false" data-mode="mind">🧠 思维</button>
+          </div>
         </div>
       </aside>
 
       <!-- 画布区 -->
       <main class="stage">
-        <div class="canvas-wrap glass" id="canvas-wrap">
+        <!-- 任务模式画布 -->
+        <div class="canvas-wrap glass mode-pane" id="mode-pane-tasks" data-mode="tasks">
           <div class="canvas-header">
             <div class="stage-header" id="stage-header">
               <h2 id="folder-title">我的任务</h2>
@@ -80,6 +87,33 @@
             </div>
           </div>
         </div>
+        <!-- 思维模式画布 -->
+        <div class="canvas-wrap glass mode-pane" id="mode-pane-mind" data-mode="mind" hidden>
+          <div class="canvas-header">
+            <div class="stage-header" id="mind-header">
+              <h2 id="mind-title">思维导图</h2>
+              <span class="meta" id="mind-meta"></span>
+              <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
+            </div>
+            <div class="mind-toolbar" id="mind-toolbar" hidden>
+              <button id="mind-zoom-out" title="缩小">−</button>
+              <span id="mind-zoom-label">100%</span>
+              <button id="mind-zoom-in" title="放大">＋</button>
+              <button id="mind-fit" title="适应画布">⤢ 适应</button>
+            </div>
+          </div>
+          <div class="canvas mind-canvas" id="mind-canvas">
+            <div class="mind-world" id="mind-world">
+              <svg class="mind-edges" id="mind-edges"></svg>
+              <div class="mind-nodes" id="mind-nodes"></div>
+            </div>
+            <div class="mind-empty" id="mind-empty">
+              <b>双击空白处</b> 即可新建思维节点<br />
+              拖节点上任意位置移动 · 单击文字编辑内容<br />
+              悬停节点显示连接点，从连接点拖到另一节点即可连线
+            </div>
+          </div>
+        </div>
       </main>
     </div>
 
@@ -120,6 +154,14 @@
           <button id="open-data-dir" class="link-btn">打开</button>
         </div>
         <div class="setting-row setting-row-btn">
+          <span class="setting-label">导出数据<br /><small>把所有任务夹与任务导出为 JSON 备份文件</small></span>
+          <button id="export-btn" class="link-btn">导出</button>
+        </div>
+        <div class="setting-row setting-row-btn">
+          <span class="setting-label">导入数据<br /><small>从导出的 JSON 备份恢复（会覆盖当前任务数据）</small></span>
+          <button id="import-btn" class="link-btn">导入</button>
+        </div>
+        <div class="setting-row setting-row-btn">
           <span class="setting-label">检查更新<br /><small>手动拉取 GitHub Releases 的最新版本，与本地版本对比</small></span>
           <button id="check-update-btn" class="link-btn">检查更新</button>
         </div>
@@ -131,6 +173,18 @@
         <div class="app-version" id="app-version">当前版本 v1.0.0</div>
         <div class="modal-actions">
           <button class="primary" id="settings-ok">完成</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 通用确认弹窗（危险操作二次确认，避免依赖宿主对原生 confirm 的支持） -->
+    <div class="modal-overlay" id="confirm-modal" hidden>
+      <div class="modal modal-confirm">
+        <h3 id="confirm-title">确认</h3>
+        <p class="confirm-msg" id="confirm-msg"></p>
+        <div class="modal-actions">
+          <button id="confirm-cancel">取消</button>
+          <button class="primary danger" id="confirm-ok">删除</button>
         </div>
       </div>
     </div>
@@ -166,5 +220,6 @@
 
     <input type="file" id="import-file" accept="application/json" hidden />
     <script type="module" src="./main.js"></script>
+    <script type="module" src="./mindmap.js"></script>
   </body>
 </html>

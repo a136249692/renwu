@@ -38,6 +38,37 @@ pub struct TaskHistory {
     pub changed_at: i64,
 }
 
+/// 思维导图：一个导图（左侧可命名/切换，直接在 SQLite 建表）
+#[derive(Serialize)]
+pub struct Mindmap {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub zoom: f64,
+}
+
+/// 思维导图内的节点（内容块）
+#[derive(Serialize)]
+pub struct MindmapNode {
+    pub id: i64,
+    pub map_id: i64,
+    pub content: String,
+    pub x: f64,
+    pub y: f64,
+    pub created_at: i64,
+}
+
+/// 思维导图内的连线（节点间关系）
+#[derive(Serialize)]
+pub struct MindmapEdge {
+    pub id: i64,
+    pub map_id: i64,
+    pub from_id: i64,
+    pub to_id: i64,
+}
+
 pub fn init_db(db_path: &std::path::Path) -> Connection {
     std::fs::create_dir_all(db_path.parent().unwrap_or(std::path::Path::new(".")))
         .expect("Failed to create data dir");
@@ -68,7 +99,30 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             change_type TEXT NOT NULL,
             changed_at INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_tasks_folder ON tasks(folder_id, is_completed, sort_order);",
+        CREATE INDEX IF NOT EXISTS idx_tasks_folder ON tasks(folder_id, is_completed, sort_order);
+        CREATE TABLE IF NOT EXISTS mindmaps (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            pan_x REAL DEFAULT 40,
+            pan_y REAL DEFAULT 40,
+            zoom REAL DEFAULT 1.0
+        );
+        CREATE TABLE IF NOT EXISTS mindmap_nodes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            map_id INTEGER NOT NULL REFERENCES mindmaps(id) ON DELETE CASCADE,
+            content TEXT NOT NULL,
+            x REAL DEFAULT 0,
+            y REAL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS mindmap_edges (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            map_id INTEGER NOT NULL REFERENCES mindmaps(id) ON DELETE CASCADE,
+            from_id INTEGER NOT NULL,
+            to_id INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mm_nodes_map ON mindmap_nodes(map_id);",
     )
     .expect("Failed to init schema");
     migrate(&conn);
@@ -430,6 +484,227 @@ pub fn list_task_history(conn: &Connection, task_id: i64) -> Result<Vec<TaskHist
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(history)
+}
+
+// ---------- 思维导图 ----------
+
+pub fn list_mindmaps(conn: &Connection) -> Result<Vec<Mindmap>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, created_at, pan_x, pan_y, zoom
+             FROM mindmaps ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let maps = stmt
+        .query_map([], |row| {
+            Ok(Mindmap {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                pan_x: row.get(3)?,
+                pan_y: row.get(4)?,
+                zoom: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(maps)
+}
+
+pub fn create_mindmap(conn: &Connection, name: &str) -> Result<Mindmap, String> {
+    let name = if name.trim().is_empty() {
+        "未命名思维导图".to_string()
+    } else {
+        name.trim().to_string()
+    };
+    let now = now_millis();
+    conn.execute(
+        "INSERT INTO mindmaps (name, created_at) VALUES (?1, ?2)",
+        rusqlite::params![name, now],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(Mindmap {
+        id,
+        name,
+        created_at: now,
+        pan_x: 40.0,
+        pan_y: 40.0,
+        zoom: 1.0,
+    })
+}
+
+pub fn rename_mindmap(conn: &Connection, id: i64, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("名称不能为空".into());
+    }
+    conn.execute(
+        "UPDATE mindmaps SET name = ?1 WHERE id = ?2",
+        rusqlite::params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn update_mindmap_view(conn: &Connection, id: i64, pan_x: f64, pan_y: f64, zoom: f64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mindmaps SET pan_x = ?1, pan_y = ?2, zoom = ?3 WHERE id = ?4",
+        rusqlite::params![pan_x, pan_y, zoom, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_mindmap(conn: &Connection, id: i64) -> Result<(), String> {
+    // 先清理该导图的连线与节点，避免遗留孤儿数据
+    conn.execute("DELETE FROM mindmap_edges WHERE map_id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mindmap_nodes WHERE map_id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mindmaps WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------- 思维导图节点 ----------
+
+pub fn list_mindmap_nodes(conn: &Connection, map_id: i64) -> Result<Vec<MindmapNode>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, map_id, content, x, y, created_at
+             FROM mindmap_nodes WHERE map_id = ?1 ORDER BY created_at ASC, id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let nodes = stmt
+        .query_map([map_id], |row| {
+            Ok(MindmapNode {
+                id: row.get(0)?,
+                map_id: row.get(1)?,
+                content: row.get(2)?,
+                x: row.get(3)?,
+                y: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(nodes)
+}
+
+pub fn create_mindmap_node(
+    conn: &Connection,
+    map_id: i64,
+    content: &str,
+    x: f64,
+    y: f64,
+) -> Result<MindmapNode, String> {
+    let content = content.to_string();
+    let now = now_millis();
+    conn.execute(
+        "INSERT INTO mindmap_nodes (map_id, content, x, y, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![map_id, content, x, y, now],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(MindmapNode {
+        id,
+        map_id,
+        content,
+        x,
+        y,
+        created_at: now,
+    })
+}
+
+pub fn update_mindmap_node_content(conn: &Connection, id: i64, content: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mindmap_nodes SET content = ?1 WHERE id = ?2",
+        rusqlite::params![content, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn update_mindmap_node_position(conn: &Connection, id: i64, x: f64, y: f64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mindmap_nodes SET x = ?1, y = ?2 WHERE id = ?3",
+        rusqlite::params![x, y, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_mindmap_node(conn: &Connection, id: i64) -> Result<(), String> {
+    // 同时删掉与该节点关联的连线
+    conn.execute("DELETE FROM mindmap_edges WHERE from_id = ?1 OR to_id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mindmap_nodes WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// ---------- 思维导图连线 ----------
+
+pub fn list_mindmap_edges(conn: &Connection, map_id: i64) -> Result<Vec<MindmapEdge>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, map_id, from_id, to_id
+             FROM mindmap_edges WHERE map_id = ?1 ORDER BY id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let edges = stmt
+        .query_map([map_id], |row| {
+            Ok(MindmapEdge {
+                id: row.get(0)?,
+                map_id: row.get(1)?,
+                from_id: row.get(2)?,
+                to_id: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(edges)
+}
+
+pub fn add_mindmap_edge(conn: &Connection, map_id: i64, from_id: i64, to_id: i64) -> Result<MindmapEdge, String> {
+    // 不允许自连
+    if from_id == to_id {
+        return Err("不能连接到自身".into());
+    }
+    // 避免重复连线
+    let dup: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM mindmap_edges WHERE map_id = ?1 AND from_id = ?2 AND to_id = ?3",
+            rusqlite::params![map_id, from_id, to_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if dup > 0 {
+        return Err("已存在该连线".into());
+    }
+    conn.execute(
+        "INSERT INTO mindmap_edges (map_id, from_id, to_id) VALUES (?1, ?2, ?3)",
+        rusqlite::params![map_id, from_id, to_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(MindmapEdge {
+        id,
+        map_id,
+        from_id,
+        to_id,
+    })
+}
+
+pub fn delete_mindmap_edge(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM mindmap_edges WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub fn now_millis() -> i64 {

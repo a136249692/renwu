@@ -31,6 +31,9 @@
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/* 兜底：hidden 必须真正隐藏。否则组件自身的 display:flex/grid 会压过 UA 的 display:none，
+   导致切到「思维」模式时任务夹按钮/列表仍残留显示。 */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   font-family: var(--font);
@@ -97,6 +100,18 @@ body.is-dragging .bg::after { opacity: 0; }
   letter-spacing: 0;
 }
 .brand h1 { font-size: 14.5px; font-weight: 650; letter-spacing: -0.02em; }
+/* 品牌名文字容器：占满剩余宽度，把设置按钮推到右上角 */
+.brand .brand-text { flex: 1; min-width: 0; }
+/* 设置按钮：位于侧栏右上角，与 logo/标题同行、与底部模式标签同款 */
+.brand #settings-btn {
+  flex: none; width: 30px; height: 30px; font-size: 14px; padding: 0;
+  color: var(--muted); background: rgba(255,255,255,0.6);
+  border: 1px solid rgba(255,255,255,0.9); border-radius: var(--radius-xs);
+  cursor: var(--cursor-arrow); font-family: inherit; font-weight: 500;
+  display: grid; place-items: center; line-height: 1;
+  transition: all 0.2s var(--ease); box-shadow: var(--sh-xs);
+}
+.brand #settings-btn:hover { color: var(--text); background: rgba(255,255,255,0.95); box-shadow: var(--sh-sm); }
 .brand-title {
   min-width: 42px; max-width: 100%;
   outline: none; cursor: var(--cursor-text);
@@ -214,14 +229,24 @@ body.is-dragging .bg::after { opacity: 0; }
 .folder-item.locked .drag-handle { opacity: 0.3; }
 
 .side-foot { display: flex; gap: 6px; padding: 2px 2px 0; border-top: 1px solid var(--hairline); margin-top: 2px; padding-top: 10px; }
-.side-foot button {
-  flex: 1; font-size: 11.5px; color: var(--muted); background: rgba(255,255,255,0.5);
-  border: 1px solid rgba(255,255,255,0.9); border-radius: var(--radius-xs); padding: 8px; cursor: var(--cursor-arrow);
-  transition: all 0.2s var(--ease); font-family: inherit; font-weight: 500;
-  box-shadow: var(--sh-xs);
+
+/* ---------- 任务 / 思维 模式切换标签 ---------- */
+.mode-tabs {
+  flex: 1; display: flex; gap: 2px; padding: 3px; border-radius: 10px;
+  background: rgba(28,31,38,0.06); box-shadow: inset 0 1px 2px rgba(28,31,38,0.06);
 }
-.side-foot button:hover { color: var(--text); background: rgba(255,255,255,0.92); box-shadow: var(--sh-sm); }
-.side-foot #settings-btn { flex: none; width: 38px; font-size: 14px; padding: 8px 0; }
+.mode-tab {
+  flex: 1; border: none; background: transparent; color: var(--muted);
+  font-size: 12px; font-weight: 600; font-family: inherit; line-height: 1;
+  padding: 7px 0; border-radius: 8px; cursor: var(--cursor-arrow);
+  transition: all 0.2s var(--ease); white-space: nowrap;
+}
+.mode-tab:hover { color: var(--text); }
+.mode-tab.active {
+  background: #fff; color: var(--text-strong);
+  box-shadow: var(--sh-xs); font-weight: 650;
+}
+.side-foot .mode-tab.active { box-shadow: var(--sh-xs), inset 0 1px 0 rgba(255,255,255,0.9); color: var(--accent-deep); }
 
 /* ---------- 画布区 ---------- */
 .stage { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
@@ -601,6 +626,21 @@ body.show-card-actions .block-del { opacity: 1; }
   box-shadow: 0 2px 8px rgba(59, 110, 245, 0.3);
 }
 .modal-actions .primary:hover { background: var(--accent-deep); box-shadow: 0 4px 12px rgba(59, 110, 245, 0.38); }
+.modal-actions .primary.danger {
+  background: var(--danger);
+  box-shadow: 0 2px 8px rgba(227, 0, 0, 0.32);
+}
+.modal-actions .primary.danger:hover {
+  background: #c50000;
+  box-shadow: 0 4px 12px rgba(227, 0, 0, 0.42);
+}
+/* 确认弹窗：描述文案 */
+.modal-confirm { width: 400px; }
+.modal-confirm .confirm-msg {
+  font-size: 13.5px; line-height: 1.75; color: var(--text); letter-spacing: 0;
+  word-break: break-word;
+}
+.modal-confirm .confirm-msg b { color: var(--text-strong); font-weight: 650; }
 
 .hidden { display: none !important; }
 
@@ -974,6 +1014,100 @@ mark {
 .folder-item.locked { cursor: var(--cursor-arrow); }
 .folder-item.locked .rm { display: none; }
 .folder-item .lock-icon { font-size: 11px; opacity: 0.4; margin-left: 2px; }
+
+/* ═══ 模式体（任务 / 思维 使用的侧栏内容区） ═══ */
+.mode-body { display: flex; flex-direction: column; gap: 10px; flex: 1; min-height: 0; }
+.mode-body[hidden] { display: none; }
+.mode-pane { flex: 1; min-height: 0; }
+.mode-pane[hidden] { display: none; }
+
+/* ═══ 思维导图画布 ═══ */
+.mind-toolbar {
+  display: flex; align-items: center; gap: 4px; margin-left: auto;
+}
+.mind-toolbar button {
+  border: 1px solid rgba(255,255,255,0.9); background: rgba(255,255,255,0.55);
+  color: var(--text); border-radius: 7px; padding: 4px 10px; font-size: 12px;
+  font-family: inherit; font-weight: 500; cursor: var(--cursor-arrow);
+  transition: all 0.18s var(--ease); box-shadow: var(--sh-xs);
+}
+.mind-toolbar button:hover { background: rgba(255,255,255,0.92); box-shadow: var(--sh-sm); }
+.mind-toolbar #mind-zoom-label {
+  min-width: 42px; text-align: center; font-size: 12px; color: var(--faint);
+  font-variant-numeric: tabular-nums; font-weight: 600;
+}
+.mind-canvas {
+  position: relative; overflow: hidden; cursor: var(--cursor-grab);
+}
+.mind-canvas.panning { cursor: var(--cursor-grabbing); }
+.mind-world {
+  position: absolute; top: 0; left: 0; transform-origin: 0 0;
+  width: 0; height: 0; will-change: transform;
+}
+.mind-edges {
+  position: absolute; left: 0; top: 0; overflow: visible;
+  pointer-events: none; z-index: 1;
+}
+.mind-edge-path { fill: none; stroke: rgba(59,110,245,0.55); stroke-width: 2.2; transition: stroke 0.15s; }
+.mind-edge.selected .mind-edge-path { stroke: var(--accent); stroke-width: 3; }
+.mind-edge:hover .mind-edge-path { stroke: var(--accent); }
+.mind-edge-hit { fill: none; stroke: transparent; stroke-width: 16; pointer-events: stroke; }
+.mind-edge-temp { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-dasharray: 6 5; pointer-events: none; }
+
+.mind-nodes { position: absolute; top: 0; left: 0; z-index: 2; }
+.mind-node {
+  position: absolute; width: 210px; min-height: 64px; background: #fff;
+  border: 2px solid transparent; border-radius: 13px;
+  box-shadow: 0 6px 18px rgba(15,23,42,0.10);
+  transition: box-shadow 0.15s, border-color 0.15s;
+  cursor: var(--cursor-grab);
+}
+.mind-node.selected { border-color: var(--accent); box-shadow: 0 8px 22px rgba(59,110,245,0.22); }
+.mind-node:active { cursor: var(--cursor-grabbing); }
+.mind-node-body {
+  padding: 12px 14px; font-size: 13px; line-height: 1.6; color: #334155;
+  outline: none; min-height: 42px; overflow: auto; cursor: var(--cursor-text);
+  white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text;
+}
+.mind-node-body:empty:before { content: "输入内容…"; color: #cbd5e1; }
+
+/* 节点连接端口 */
+.mind-port {
+  position: absolute; width: 12px; height: 12px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #fff; opacity: 0; transition: 0.15s;
+  cursor: var(--cursor-arrow); z-index: 3;
+}
+.mind-node:hover .mind-port { opacity: 0.9; }
+.mind-port:hover { opacity: 1; transform: scale(1.35); }
+.mind-port.port-top    { left: 50%; top: 0;    transform: translate(-50%,-50%); }
+.mind-port.port-right  { left: 100%; top: 50%; transform: translate(-50%,-50%); }
+.mind-port.port-bottom { left: 50%; top: 100%; transform: translate(-50%,-50%); }
+.mind-port.port-left   { left: 0;  top: 50%;  transform: translate(-50%,-50%); }
+.mind-port.port-top:hover, .mind-port.port-bottom:hover { transform: translate(-50%,-50%) scale(1.35); }
+.mind-port.port-left:hover, .mind-port.port-right:hover { transform: translate(-50%,-50%) scale(1.35); }
+
+.mind-node .rm-node {
+  position: absolute; top: 4px; right: 4px; border: none; background: transparent;
+  color: var(--faint); font-size: 13px; line-height: 1; padding: 3px; border-radius: 6px;
+  opacity: 0; cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
+}
+.mind-node:hover .rm-node { opacity: 1; }
+.mind-node .rm-node:hover { color: #fff; background: var(--danger); }
+
+.mind-empty {
+  position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
+  color: var(--faint); font-size: 13.5px; line-height: 1.9; pointer-events: none;
+  padding: 20px;
+}
+.mind-empty b { color: var(--muted); font-size: 15px; }
+
+/* 思维导图名称重命名输入框（侧栏列表内） */
+.map-rename-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 13.5px; font-weight: 600;
+  color: var(--text-strong); border: none; outline: none;
+  background: #fff; border-radius: 6px; padding: 2px 6px;
+  box-shadow: 0 0 0 2px var(--accent), var(--sh-xs);
+}
 
 /* ═══ 合并提示 ═══ */
 .merge-hint {
