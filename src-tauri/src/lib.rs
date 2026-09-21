@@ -47,7 +47,17 @@ pub fn run() {
             delete_mindmap_node,
             list_mindmap_edges,
             add_mindmap_edge,
-            delete_mindmap_edge
+            delete_mindmap_edge,
+            list_image_folders,
+            create_image_folder,
+            rename_image_folder,
+            update_image_folder_view,
+            delete_image_folder,
+            list_image_items,
+            save_image,
+            update_image_item,
+            delete_image_item,
+            read_image_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -277,4 +287,114 @@ fn add_mindmap_edge(state: DbState, map_id: i64, from_id: i64, to_id: i64) -> Re
 fn delete_mindmap_edge(state: DbState, id: i64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::delete_mindmap_edge(&conn, id)
+}
+
+/// 取应用数据目录；图片文件与数据库都放在这里，便于整目录备份。
+fn app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path().app_data_dir().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn list_image_folders(state: DbState) -> Result<Vec<db::ImageFolder>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_image_folders(&conn)
+}
+
+#[tauri::command]
+fn create_image_folder(state: DbState, name: String) -> Result<db::ImageFolder, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::create_image_folder(&conn, &name)
+}
+
+#[tauri::command]
+fn rename_image_folder(state: DbState, id: i64, name: String) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::rename_image_folder(&conn, id, &name)
+}
+
+#[tauri::command]
+fn update_image_folder_view(state: DbState, id: i64, pan_x: f64, pan_y: f64, zoom: f64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_image_folder_view(&conn, id, pan_x, pan_y, zoom)
+}
+
+#[tauri::command]
+fn delete_image_folder(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(), String> {
+    // 先删数据库记录（image_items 级联删除），再删该夹的图片目录。
+    // 顺序反过来会有「文件已删、记录还在」的窗口期，点开放裂图标会报错。
+    {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        db::delete_image_folder(&conn, id)?;
+    }
+    let dir = app_data_dir(&app)?;
+    let img_dir = db::folder_image_dir(&dir, id);
+    if img_dir.exists() {
+        std::fs::remove_dir_all(&img_dir).map_err(|e| format!("无法删除图片目录: {e}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_image_items(state: DbState, folder_id: i64) -> Result<Vec<db::ImageItem>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_image_items(&conn, folder_id)
+}
+
+/// 保存上传的图片。data 为原始图片字节（前端 File → ArrayBuffer → invoke）。
+/// Tauri 参数名按 snake_case 绑定，JS 侧传 folderId 会自动映射到 folder_id。
+#[tauri::command]
+fn save_image(
+    app: tauri::AppHandle,
+    state: DbState,
+    folder_id: i64,
+    file_name: String,
+    title: String,
+    data: Vec<u8>,
+) -> Result<db::ImageItem, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    let dir = app_data_dir(&app)?;
+    db::save_image(&conn, &dir, folder_id, &file_name, &title, &data)
+}
+
+#[tauri::command]
+fn update_image_item(
+    state: DbState,
+    id: i64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    title: String,
+) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_image_item(&conn, id, x, y, width, height, &title)
+}
+
+#[tauri::command]
+fn delete_image_item(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(), String> {
+    // 取出该图片的相对路径，用于删除物理文件
+    let rel = {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        conn.query_row(
+            "SELECT folder_id, file_path FROM image_items WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .map_err(|_| "图片不存在".to_string())?
+    };
+    {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        db::delete_image_item(&conn, id)?;
+    }
+    let dir = app_data_dir(&app)?;
+    let abs = db::images_root(&dir).join(&rel.1);
+    let _ = std::fs::remove_file(&abs);
+    Ok(())
+}
+
+/// 读取单张图片的原始字节。前端用 blob URL 直接绘制，避免每张图片都常驻内存 base64。
+#[tauri::command]
+fn read_image_file(app: tauri::AppHandle, folder_id: i64, file_path: String) -> Result<Vec<u8>, String> {
+    let dir = app_data_dir(&app)?;
+    db::read_image_file(&dir, folder_id, &file_path)
 }

@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use serde::Serialize;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub struct AppState {
@@ -69,6 +70,34 @@ pub struct MindmapEdge {
     pub to_id: i64,
 }
 
+/// 图片夹：一个独立的图片墙画布（左侧可命名/切换，图片文件按夹归档到本地）
+#[derive(Serialize)]
+pub struct ImageFolder {
+    pub id: i64,
+    pub name: String,
+    pub created_at: i64,
+    pub total: i64,
+    pub pan_x: f64,
+    pub pan_y: f64,
+    pub zoom: f64,
+}
+
+/// 图片墙中的一张图片。file_path 存的是相对 images/ 根目录的路径
+/// （形如 <folder_id>/<uuid>.png），便于整个目录迁移；读取时再拼接绝对路径。
+#[derive(Serialize)]
+pub struct ImageItem {
+    pub id: i64,
+    pub folder_id: i64,
+    pub file_name: String,
+    pub file_path: String,
+    pub title: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub created_at: i64,
+}
+
 pub fn init_db(db_path: &std::path::Path) -> Connection {
     std::fs::create_dir_all(db_path.parent().unwrap_or(std::path::Path::new(".")))
         .expect("Failed to create data dir");
@@ -122,7 +151,28 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             from_id INTEGER NOT NULL,
             to_id INTEGER NOT NULL
         );
-        CREATE INDEX IF NOT EXISTS idx_mm_nodes_map ON mindmap_nodes(map_id);",
+        CREATE INDEX IF NOT EXISTS idx_mm_nodes_map ON mindmap_nodes(map_id);
+        CREATE TABLE IF NOT EXISTS image_folders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            pan_x REAL DEFAULT 40,
+            pan_y REAL DEFAULT 40,
+            zoom REAL DEFAULT 1.0
+        );
+        CREATE TABLE IF NOT EXISTS image_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            folder_id INTEGER NOT NULL REFERENCES image_folders(id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            title TEXT DEFAULT '',
+            x REAL DEFAULT 0,
+            y REAL DEFAULT 0,
+            width REAL DEFAULT 0,
+            height REAL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_items_folder ON image_items(folder_id);",
     )
     .expect("Failed to init schema");
     migrate(&conn);
@@ -705,6 +755,212 @@ pub fn delete_mindmap_edge(conn: &Connection, id: i64) -> Result<(), String> {
     conn.execute("DELETE FROM mindmap_edges WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// ---------- 图片墙 ----------
+
+/// 图片文件统一归档在 <app_data>/images/<folder_id>/ 下，与数据库同级，
+/// 便于「用系统文件管理器打开数据目录」时一并备份/迁移。
+pub fn images_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("images")
+}
+
+pub fn folder_image_dir(data_dir: &Path, folder_id: i64) -> PathBuf {
+    images_root(data_dir).join(folder_id.to_string())
+}
+
+pub fn list_image_folders(conn: &Connection) -> Result<Vec<ImageFolder>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT f.id, f.name, f.created_at, f.pan_x, f.pan_y, f.zoom,
+                    (SELECT COUNT(*) FROM image_items i WHERE i.folder_id = f.id) AS total
+             FROM image_folders f ORDER BY f.created_at ASC, f.id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let folders = stmt
+        .query_map([], |row| {
+            Ok(ImageFolder {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                created_at: row.get(2)?,
+                pan_x: row.get(3)?,
+                pan_y: row.get(4)?,
+                zoom: row.get(5)?,
+                total: row.get(6)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(folders)
+}
+
+pub fn create_image_folder(conn: &Connection, name: &str) -> Result<ImageFolder, String> {
+    let name = if name.trim().is_empty() {
+        "未命名图片夹".to_string()
+    } else {
+        name.trim().to_string()
+    };
+    let now = now_millis();
+    conn.execute(
+        "INSERT INTO image_folders (name, created_at) VALUES (?1, ?2)",
+        rusqlite::params![name, now],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(ImageFolder {
+        id,
+        name,
+        created_at: now,
+        pan_x: 40.0,
+        pan_y: 40.0,
+        zoom: 1.0,
+        total: 0,
+    })
+}
+
+pub fn rename_image_folder(conn: &Connection, id: i64, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("名称不能为空".into());
+    }
+    conn.execute(
+        "UPDATE image_folders SET name = ?1 WHERE id = ?2",
+        rusqlite::params![name, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn update_image_folder_view(conn: &Connection, id: i64, pan_x: f64, pan_y: f64, zoom: f64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE image_folders SET pan_x = ?1, pan_y = ?2, zoom = ?3 WHERE id = ?4",
+        rusqlite::params![pan_x, pan_y, zoom, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_image_folder(conn: &Connection, id: i64) -> Result<(), String> {
+    // image_items 依赖 ON DELETE CASCADE 自动清理数据库记录；
+    // 物理图片文件由调用方（lib.rs 命令）删除对应目录。
+    conn.execute("DELETE FROM image_folders WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 保存一张上传的图片：先落盘到 <app_data>/images/<folder_id>/，再写数据库记录。
+/// 落盘失败时不会留下孤儿数据库行；写库失败时会删掉刚写入的文件。
+pub fn save_image(
+    conn: &Connection,
+    data_dir: &Path,
+    folder_id: i64,
+    file_name: &str,
+    title: &str,
+    data: &[u8],
+) -> Result<ImageItem, String> {
+    if data.is_empty() {
+        return Err("图片数据为空".into());
+    }
+    let rel = format!("{}/{}", folder_id, file_name);
+    let abs = images_root(data_dir).join(&rel);
+    std::fs::create_dir_all(abs.parent().ok_or("图片目录异常")?)
+        .map_err(|e| format!("无法创建图片目录: {e}"))?;
+    std::fs::write(&abs, data).map_err(|e| format!("无法保存图片: {e}"))?;
+
+    let now = now_millis();
+    let title = title.trim().to_string();
+    let result = conn
+        .execute(
+            "INSERT INTO image_items (folder_id, file_name, file_path, title, x, y, width, height, created_at)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, ?5)",
+            rusqlite::params![folder_id, file_name, rel, title, now],
+        )
+        .map_err(|e| e.to_string());
+    match result {
+        Ok(_) => Ok(ImageItem {
+            id: conn.last_insert_rowid(),
+            folder_id,
+            file_name: file_name.to_string(),
+            file_path: rel,
+            title,
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            created_at: now,
+        }),
+        Err(e) => {
+            // 写库失败，回收刚落盘的文件，避免出现无记录的文件
+            let _ = std::fs::remove_file(&abs);
+            Err(e)
+        }
+    }
+}
+
+pub fn list_image_items(conn: &Connection, folder_id: i64) -> Result<Vec<ImageItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, folder_id, file_name, file_path, title, x, y, width, height, created_at
+             FROM image_items WHERE folder_id = ?1 ORDER BY id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let items = stmt
+        .query_map([folder_id], |row| {
+            Ok(ImageItem {
+                id: row.get(0)?,
+                folder_id: row.get(1)?,
+                file_name: row.get(2)?,
+                file_path: row.get(3)?,
+                title: row.get(4)?,
+                x: row.get(5)?,
+                y: row.get(6)?,
+                width: row.get(7)?,
+                height: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(items)
+}
+
+pub fn update_image_item(
+    conn: &Connection,
+    id: i64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    title: &str,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE image_items SET x = ?1, y = ?2, width = ?3, height = ?4, title = ?5 WHERE id = ?6",
+        rusqlite::params![x, y, width, height, title, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub fn delete_image_item(conn: &Connection, id: i64) -> Result<(), String> {
+    conn.execute("DELETE FROM image_items WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 读取单张图片的原始字节（按记录里的相对路径定位）。
+pub fn read_image_file(data_dir: &Path, folder_id: i64, file_path: &str) -> Result<Vec<u8>, String> {
+    let abs = images_root(data_dir).join(file_path);
+    // 目录穿越防护：相对路径必须落在该夹的子目录下
+    let abs_canonical = abs.canonicalize().map_err(|e| format!("图片不存在: {e}"))?;
+    let base = folder_image_dir(data_dir, folder_id)
+        .canonicalize()
+        .map_err(|e| format!("图片目录不存在: {e}"))?;
+    if !abs_canonical.starts_with(&base) {
+        return Err("非法的图片路径".into());
+    }
+    std::fs::read(&abs_canonical).map_err(|e| format!("无法读取图片: {e}"))
 }
 
 pub fn now_millis() -> i64 {

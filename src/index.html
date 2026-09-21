@@ -31,10 +31,15 @@
           <button class="new-folder-btn" id="new-map-btn">＋ 新建思维导图</button>
           <ul class="folder-list" id="map-list"></ul>
         </div>
+        <div class="mode-body" id="mode-body-images" hidden>
+          <button class="new-folder-btn" id="new-image-folder-btn">＋ 新建图片夹</button>
+          <ul class="folder-list" id="image-folder-list"></ul>
+        </div>
         <div class="side-foot">
-          <div class="mode-tabs" id="mode-tabs" role="tablist" title="切换：任务 / 思维">
+          <div class="mode-tabs" id="mode-tabs" role="tablist" title="切换：任务 / 思维 / 图片">
             <button class="mode-tab active" id="tab-tasks" role="tab" aria-selected="true" data-mode="tasks">📋 任务</button>
             <button class="mode-tab" id="tab-mind" role="tab" aria-selected="false" data-mode="mind">🧠 思维</button>
+            <button class="mode-tab" id="tab-images" role="tab" aria-selected="false" data-mode="images">🖼 图片</button>
           </div>
         </div>
       </aside>
@@ -111,6 +116,31 @@
               <b>双击空白处</b> 即可新建思维节点<br />
               拖节点上任意位置移动 · 单击文字编辑内容<br />
               悬停节点显示连接点，从连接点拖到另一节点即可连线
+            </div>
+          </div>
+        </div>
+        <!-- 图片模式画布 -->
+        <div class="canvas-wrap glass mode-pane" id="mode-pane-images" data-mode="images" hidden>
+          <div class="canvas-header">
+            <div class="stage-header" id="image-header">
+              <h2 id="image-title">图片墙</h2>
+              <span class="meta" id="image-meta"></span>
+              <span class="hint"><kbd>双击空白</kbd> 上传 · <kbd>Ctrl+V</kbd> 粘贴 · 拖拽图片到画布 · <kbd>滚轮</kbd> 缩放 · 拖空白平移</span>
+            </div>
+            <div class="mind-toolbar" id="image-toolbar" hidden>
+              <button id="image-add" title="上传图片">＋ 上传</button>
+              <button id="image-zoom-out" title="缩小">−</button>
+              <span id="image-zoom-label">100%</span>
+              <button id="image-zoom-in" title="放大">＋</button>
+              <button id="image-fit" title="适应画布">⤢ 适应</button>
+            </div>
+          </div>
+          <div class="canvas image-canvas" id="image-canvas">
+            <div class="image-world" id="image-world"></div>
+            <div class="image-empty" id="image-empty">
+              <b>双击空白处</b> 即可上传图片<br />
+              或按 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴 · 直接把图片拖进画布<br />
+              图片会保存到本地并按当前图片夹归档
             </div>
           </div>
         </div>
@@ -219,7 +249,9 @@
     </div>
 
     <input type="file" id="import-file" accept="application/json" hidden />
+    <input type="file" id="image-file-input" accept="image/*" multiple hidden />
     <script type="module" src="./main.js"></script>
     <script type="module" src="./mindmap.js"></script>
+    <script type="module" src="./image-wall.js"></script>
   </body>
 </html>

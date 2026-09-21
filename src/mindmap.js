@@ -57,11 +57,14 @@ const confirmOkBtn = $("confirm-ok");
 const confirmCancelBtn = $("confirm-cancel");
 const tabTasks = $("tab-tasks");
 const tabMind = $("tab-mind");
+const tabImages = $("tab-images");
 const newFolderBtn = $("new-folder-btn");
 const folderListEl = $("folder-list");
 const modeBodyMind = $("mode-body-mind");
+const modeBodyImages = $("mode-body-images");
 const folderPane = $("mode-pane-tasks");
 const mindPane = $("mode-pane-mind");
+const imagePane = $("mode-pane-images");
 const mapListEl = $("map-list");
 const newMapBtn = $("new-map-btn");
 const mindTitle = $("mind-title");
@@ -117,13 +120,16 @@ function askConfirm(message, opts) {
     confirmOkBtn.textContent = o.okText || "确认";
     _confirmResolve = resolve;
     confirmModal.hidden = false;
+    // 把 resolve 挂到全局，让 image-wall.js 等其他模块也能触发同一弹窗。
+    window.__confirmResolve = resolve;
   });
 }
 function closeConfirm(ok) {
   if (confirmModal.hidden) return;
   confirmModal.hidden = true;
-  const r = _confirmResolve;
+  const r = _confirmResolve || window.__confirmResolve;
   _confirmResolve = null;
+  window.__confirmResolve = null;
   if (r) r(ok);
 }
 
@@ -228,19 +234,25 @@ async function apiDeleteEdge(id) {
 function setMode(m) {
   if (mode === m) return;
   mode = m;
-  const isMind = m === "mind";
-  tabTasks.classList.toggle("active", !isMind);
-  tabMind.classList.toggle("active", isMind);
-  tabTasks.setAttribute("aria-selected", String(!isMind));
-  tabMind.setAttribute("aria-selected", String(isMind));
+  tabTasks.classList.toggle("active", m === "tasks");
+  tabMind.classList.toggle("active", m === "mind");
+  tabImages.classList.toggle("active", m === "images");
+  tabTasks.setAttribute("aria-selected", String(m === "tasks"));
+  tabMind.setAttribute("aria-selected", String(m === "mind"));
+  tabImages.setAttribute("aria-selected", String(m === "images"));
   // 侧栏列表
-  newFolderBtn.hidden = isMind;
-  folderListEl.hidden = isMind;
-  modeBodyMind.hidden = !isMind;
+  newFolderBtn.hidden = m !== "tasks";
+  folderListEl.hidden = m !== "tasks";
+  modeBodyMind.hidden = m !== "mind";
+  modeBodyImages.hidden = m !== "images";
   // 画布容器
-  folderPane.hidden = isMind;
-  mindPane.hidden = !isMind;
-  if (isMind) requestAnimationFrame(() => loadMaps());
+  folderPane.hidden = m !== "tasks";
+  mindPane.hidden = m !== "mind";
+  imagePane.hidden = m !== "images";
+  if (m === "mind") requestAnimationFrame(() => loadMaps());
+  // 图片墙模块自行注册加载钩子（image-wall.js 里挂到 window），
+  // 这里只负责在切到图片模式时触发，避免本模块反向依赖图片墙实现。
+  if (m === "images") requestAnimationFrame(() => window.__loadImageWall && window.__loadImageWall());
 }
 
 /* ═══════════ 左侧：导图列表 ═══════════ */
@@ -340,12 +352,15 @@ function startRenameMap(li, m) {
     _renaming = false;   // 先复位标志，renderMapList 才会真正重建（否则输入框永远清不掉）
     const val = (input.value || "").trim() || old;
     if (save && val !== old) {
+      // apiRenameMap 是异步的：m.name 要在其内部 await 完成后才更新。
+      // 必须把列表刷新放进 .then() 里，否则渲染发生在名字落库之前，界面仍是旧名。
       apiRenameMap(m.id, val).then(() => {
-        m.name = val;
         if (m.id === activeMapId) renderMindHeader();
+        renderMapList();
       });
+    } else {
+      renderMapList();
     }
-    renderMapList();
   };
   input.addEventListener("blur", () => commit(true));
   input.addEventListener("keydown", e => {
@@ -948,6 +963,7 @@ function bindKeyboard() {
 function bindModeTabs() {
   tabTasks.addEventListener("click", () => setMode("tasks"));
   tabMind.addEventListener("click", () => setMode("mind"));
+  tabImages.addEventListener("click", () => setMode("images"));
 }
 async function init() {
   newMapBtn.addEventListener("click", async () => {
