@@ -242,7 +242,6 @@ body.is-dragging .bg::after { opacity: 0; }
   transition: all 0.2s var(--ease); white-space: nowrap;
   display: inline-flex; align-items: center; justify-content: center; gap: 5px;
 }
-.mode-tab .tab-ico { flex: none; width: 14px; height: 14px; }
 .mode-tab:hover { color: var(--text); }
 .mode-tab.active {
   background: #fff; color: var(--text-strong);
