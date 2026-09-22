@@ -23,6 +23,14 @@ async function mi(cmd, args) {
   }
   return null;
 }
+// mi() 会把 Tauri 端错误吞掉并返回 null，用于"读"接口无所谓。
+// 但对上传/保存这类写操作，null 会掩盖真实错误，导致用户只看到
+// "上传失败：未返回图片信息"这种误导信息，看不到实际的 RPC 失败原因。
+// 这里做一个会抛异常的版本，仅在确实需要感知 Tauri 错误的写接口里使用。
+async function miStrict(cmd, args) {
+  if (!isTauri()) return null;
+  return await invokeImpl(cmd, args);
+}
 
 /* ---------- localStorage 兜底（浏览器预览：直接存 base64，简单可靠） ---------- */
 const LS_FOLDERS = "glassCanvas.imageFolders";
@@ -188,7 +196,9 @@ function bytesToBase64(u8) {
 }
 async function apiSaveImage(folderId, fileName, title, data) {
   if (isTauri()) {
-    return await mi("save_image", {
+    // 用 miStrict 让 Tauri 端错误抛出来而不是被吞成 null，
+    // 否则任何上传失败都会伪装成"未返回图片信息"，用户查不出真实原因。
+    return await miStrict("save_image", {
       folder_id: folderId,
       file_name: fileName,
       title,
@@ -573,6 +583,9 @@ async function uploadFile(file) {
     // 有些截图粘贴 mime 可能是空
     if (!file || (file.type && !file.type.startsWith("image"))) return;
   }
+  // 提前校验，给清晰错误而不是让 Tauri 端报错再吞掉
+  if (!file.size) { toast("上传失败：图片为空", 3500); return; }
+  if (file.size > 30 * 1024 * 1024) { toast(`上传失败：图片过大（${(file.size / 1024 / 1024).toFixed(1)}MB，限制 30MB）`, 4000); return; }
   try {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -580,7 +593,7 @@ async function uploadFile(file) {
     const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
     const title = (file.name.replace(/\.[^.]+$/, "") || "").trim() || "图片";
     const it = await apiSaveImage(activeFolder.id, fileName, title, bytes);
-    if (!it) { toast("上传失败：未返回图片信息", 3500); return; }
+    if (!it) { toast("上传失败：后端未返回图片信息", 3500); return; }
     // 拿到宽高用于初始布局
     const dim = await probeImageSize(bytes, file.type || guessMime(fileName));
     // 放置在画布中心
@@ -644,7 +657,7 @@ async function renderFolderList() {
     li.innerHTML = `
       <span class="name">${esc(f.name)}</span>
       <span class="cnt">${f.total ?? 0}</span>
-      <button class="rm" title="删除" aria-label="删除图片夹">✕</button>
+      <button class="rm" title="删除图片夹" aria-label="删除图片夹">×</button>
     `;
     li.addEventListener("click", e => {
       if (e.target.closest(".rm")) { e.stopPropagation(); return; }
