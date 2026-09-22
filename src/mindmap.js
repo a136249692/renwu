@@ -163,7 +163,7 @@ async function apiDeleteMap(id) {
   lsEdgesArr = lsEdgesArr.filter(e => e.map_id !== id); lsSaveOf(LS_EDGES, lsEdgesArr);
 }
 async function apiSaveView(id, x, y, zoom) {
-  if (isTauri()) await mi("update_mindmap_view", { id, pan_x: x, pan_y: y, zoom });
+  if (isTauri()) await mi("update_mindmap_view", { id, panX: x, panY: y, zoom });
   const m = maps.find(v => v.id === id);
   if (m) { m.pan_x = x; m.pan_y = y; m.zoom = zoom; }
   const lm = lsMaps.find(v => v.id === id);

@@ -183,12 +183,14 @@ async function apiDeleteFolder(id) {
   }
 }
 async function apiSaveFolderView(id, pan_x, pan_y, zoom) {
-  if (isTauri()) await mi("update_image_folder_view", { id, pan_x, pan_y, zoom });
+  // Tauri v2 默认把 Rust 的 snake_case 参数映射成 JS 的 camelCase，
+  // 所以这里必须传 panX/panY，否则 invoke 会以 "invalid args" 失败。
+  if (isTauri()) await mi("update_image_folder_view", { id, panX: pan_x, panY: pan_y, zoom });
   const f = folders.find(x => x.id === id); if (f) { f.pan_x = pan_x; f.pan_y = pan_y; f.zoom = zoom; }
   const lf = lsFolders.find(x => x.id === id); if (lf) { lf.pan_x = pan_x; lf.pan_y = pan_y; lf.zoom = zoom; lsSave(lsFolders); }
 }
 async function apiListItems(folderId) {
-  const r = await mi("list_image_items", { folder_id: folderId });
+  const r = await mi("list_image_items", { folderId });
   if (r) return r;
   return lsItems.filter(x => x.folder_id === folderId);
 }
@@ -204,9 +206,10 @@ async function apiSaveImage(folderId, fileName, title, data) {
   if (isTauri()) {
     // 用 miStrict 让 Tauri 端错误抛出来而不是被吞成 null，
     // 否则任何上传失败都会伪装成"未返回图片信息"，用户查不出真实原因。
+    // 注意：参数名走 Tauri v2 的 camelCase 约定（folder_id → folderId 等）。
     return await miStrict("save_image", {
-      folder_id: folderId,
-      file_name: fileName,
+      folderId,
+      fileName,
       title,
       data: Array.from(data, b => b & 0xff),
     });
@@ -243,7 +246,7 @@ async function apiDeleteItem(id) {
 }
 async function apiReadImageFile(folderId, filePath) {
   if (isTauri()) {
-    const bytes = await mi("read_image_file", { folder_id: folderId, file_path: filePath });
+    const bytes = await mi("read_image_file", { folderId, filePath });
     if (!bytes) return null;
     const u8 = new Uint8Array(bytes);
     const mime = guessMime(filePath);
@@ -523,7 +526,7 @@ async function cloneItem(it) {
   try {
     let bytes = null;
     if (isTauri()) {
-      const bytesRaw = await mi("read_image_file", { folder_id: activeFolder.id, file_path: it.file_path });
+      const bytesRaw = await mi("read_image_file", { folderId: activeFolder.id, filePath: it.file_path });
       if (bytesRaw) bytes = new Uint8Array(bytesRaw);
     } else {
       const key = `glassCanvas.img.${activeFolder.id}.${it.file_name}`;
