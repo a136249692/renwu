@@ -111,6 +111,7 @@ const imageTitleEl    = $("image-title");
 const imageMetaEl     = $("image-meta");
 const imageToolbar    = $("image-toolbar");
 const imageAddBtn     = $("image-add");
+const imageCombineBtn = $("image-combine");
 const imageZoomOutBtn = $("image-zoom-out");
 const imageZoomInBtn  = $("image-zoom-in");
 const imageZoomLabel  = $("image-zoom-label");
@@ -420,6 +421,15 @@ function selectItem(id, additive) {
     selection.add(id);
   }
   for (const [iid, el] of itemEls) el.classList.toggle("selected", selection.has(iid));
+  syncCombineBtn();
+}
+/* ---------- 组合按钮显隐：只有选中 ≥2 张时启用 ---------- */
+function syncCombineBtn() {
+  if (!imageCombineBtn) return;
+  imageCombineBtn.hidden = selection.size < 2;
+  if (selection.size >= 2) {
+    imageCombineBtn.title = `组合 ${selection.size} 张选中图片（Ctrl+M）`;
+  }
 }
 function bringToFront(it) {
   it.z = ++zTop;
@@ -457,7 +467,10 @@ function startCardDrag(e, it, el) {
   document.addEventListener("mouseup", up);
 }
 
-/* ---------- 拖拽：缩放 ---------- */
+/* ---------- 拖拽：缩放 ----------
+ * 使用 flex 列布局：wrap 用 flex:1 自动填满 caption 之外的空间。
+ * 这里只改 width/height 两个 inline 样式，不再写 aspectRatio，
+ * 否则 aspect-ratio 会和 flex 高度分配冲突，导致 se/s 手柄无法真正缩小。 */
 function startResize(e, it, el) {
   const dir = e.target.dataset.dir;
   const sx = e.clientX, sy = e.clientY;
@@ -470,7 +483,6 @@ function startResize(e, it, el) {
     if (dir === "se" || dir === "s") it.height = Math.max(80, h0 + dy);
     el.style.width = it.width + "px";
     el.style.height = it.height + "px";
-    el.style.aspectRatio = it.height > 0 ? `${it.width} / ${it.height}` : "auto";
   };
   const up = () => {
     document.removeEventListener("mousemove", move);
@@ -571,12 +583,109 @@ async function removeItem(id) {
   selection.delete(id);
   const el = itemEls.get(id);
   if (el) { el.remove(); itemEls.delete(id); }
+  syncCombineBtn();
   // 同步侧栏计数到内存 folders[] 和 localStorage（之前只改内存，刷新后又归零）
   syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
   renderFolderList();
   updateEmpty();
   updateHeader();
   toast("已删除");
+}
+
+/* ---------- 读取图片字节（不做 URL 转换），供组合功能使用 ---------- */
+async function apiReadImageBytes(it) {
+  const folderId = it.folder_id ?? activeFolderId;
+  if (isTauri()) {
+    const bytes = await mi("read_image_file", { folderId, filePath: it.file_path });
+    return bytes ? new Uint8Array(bytes) : null;
+  }
+  try {
+    const key = `glassCanvas.img.${folderId}.${String(it.file_path).split("/").pop()}`;
+    const dataURL = localStorage.getItem(key);
+    if (!dataURL) return null;
+    const b64 = dataURL.split(",")[1];
+    if (!b64) return null;
+    return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  } catch { return null; }
+}
+function loadImageFromBytes(bytes, mime) {
+  return new Promise(resolve => {
+    if (!bytes) { resolve(null); return; }
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime || "image/png" }));
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
+    img.src = url;
+  });
+}
+
+/* ---------- 组合选中的图片 ----------
+ * 选中的卡片按其当前 x/y/width/height 拼进一张新的 PNG，
+ * 画布大小 = 选区外接矩形 + 16px 内边距，然后删除原图。
+ * 这样既保留了用户摆放的位置关系，也让最终图片四周有一点留白。
+ */
+async function combineSelected() {
+  if (selection.size < 2) { toast("请至少选中 2 张图片再组合", 3500); return; }
+  if (!activeFolder) { toast("请先选择一个图片夹", 3500); return; }
+  const sel = items.filter(it => selection.has(it.id));
+  if (sel.length < 2) return;
+  if (imageCombineBtn) { imageCombineBtn.disabled = true; imageCombineBtn.textContent = "⧉ 合成中…"; }
+  try {
+    const PAD = 16;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const it of sel) {
+      const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
+      minX = Math.min(minX, it.x); minY = Math.min(minY, it.y);
+      maxX = Math.max(maxX, it.x + w); maxY = Math.max(maxY, it.y + h);
+    }
+    const contentW = Math.max(1, maxX - minX);
+    const contentH = Math.max(1, maxY - minY);
+    const canvas = document.createElement("canvas");
+    canvas.width = contentW + PAD * 2;
+    canvas.height = contentH + PAD * 2;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    for (const it of sel) {
+      const bytes = await apiReadImageBytes(it);
+      if (!bytes) continue;
+      const img = await loadImageFromBytes(bytes, guessMime(it.file_path || it.file_name || ""));
+      if (!img) continue;
+      const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
+      ctx.drawImage(img, PAD + (it.x - minX), PAD + (it.y - minY), w, h);
+    }
+    const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+    if (!blob) { toast("组合失败：无法生成图片", 3500); return; }
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    const fileName = `${Date.now()}-combo-${Math.random().toString(36).slice(2, 6)}.png`;
+    const newItem = await apiSaveImage(activeFolder.id, fileName, "组合图片", buf);
+    if (!newItem) { toast("组合失败：未返回图片信息", 3500); return; }
+    newItem.x = minX - PAD;
+    newItem.y = minY - PAD;
+    newItem.width = canvas.width;
+    newItem.height = canvas.height;
+    newItem.z = ++zTop;
+    items.push(newItem);
+    debouncedSaveItem(newItem.id);
+    // 移除原图
+    for (const id of sel.map(it => it.id)) {
+      try { await apiDeleteItem(id); } catch (err) { console.warn("[图片墙] 删除原图失败:", id, err); }
+    }
+    items = items.filter(x => !sel.some(s => s.id === x.id));
+    selection.clear();
+    syncFolderTotal(activeFolder, items.length);
+    renderFolderList();
+    renderItems();
+    updateEmpty();
+    updateHeader();
+    syncCombineBtn();
+    toast(`已组合 ${sel.length} 张图片`, 2500);
+  } catch (err) {
+    console.error("[图片墙] 组合失败:", err);
+    toast("组合失败：" + (err.message || String(err)).slice(0, 60), 3500);
+  } finally {
+    if (imageCombineBtn) { imageCombineBtn.disabled = false; imageCombineBtn.textContent = "⧉ 组合"; }
+  }
 }
 
 /* ---------- 图片上传 ---------- */
@@ -1037,14 +1146,22 @@ function bindToolbar() {
     zoomAt(r.width / 2, r.height / 2, 1 / 1.2);
   });
   if (imageFitBtn) imageFitBtn.addEventListener("click", () => fitView());
+  if (imageCombineBtn) imageCombineBtn.addEventListener("click", () => combineSelected());
 }
 
-/* ---------- 键盘：Delete 删除选中 ---------- */
+/* ---------- 键盘：Delete 删除选中，Ctrl+M 组合选中 ---------- */
 function bindKeyboard() {
   document.addEventListener("keydown", async e => {
     if (!imagePane || imagePane.hidden) return;
     if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
     if (_renaming) return;
+    // Ctrl+M / Cmd+M：组合选中的 2+ 张图
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+        (e.key === "m" || e.key === "M")) {
+      e.preventDefault();
+      combineSelected();
+      return;
+    }
     if ((e.key === "Delete" || e.key === "Backspace") && selection.size) {
       e.preventDefault();
       for (const id of [...selection]) await removeItem(id);
