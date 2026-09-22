@@ -1186,8 +1186,14 @@ mark {
   display: grid; place-items: center;
 }
 .card-img {
-  max-width: 100%; max-height: 100%; width: 100%; height: 100%;
-  object-fit: contain;
+  /* 用 cover：填满 wrap，保持原始比例并居中裁切。
+     之前用 contain 会在 wrap 与图片比例不一致时出现大块灰底，
+     尤其是 se/s 手柄拖出极端比例时非常难看。
+     用户如需完整图片，双击标题栏可复制再单独看。 */
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
   display: block;
   pointer-events: none;
   -webkit-user-drag: none; user-drag: none;

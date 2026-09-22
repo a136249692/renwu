@@ -324,6 +324,9 @@ function renderItems() {
     el.style.left = it.x + "px";
     el.style.top = it.y + "px";
     el.style.width = (it.width || CARD_DEFAULT_W) + "px";
+    // 必须显式设 height：新 flex 布局下 wrap 靠 flex:1 填满剩余空间，
+    // 若父容器没有明确高度，wrap 就永远只按 min-height(8px) 撑开，卡片会缩成一条线。
+    el.style.height = (it.height || CARD_DEFAULT_W) + "px";
     el.style.zIndex = it.z || zTop++;
     el.classList.toggle("selected", selection.has(it.id));
   }
@@ -353,9 +356,8 @@ function createCardEl(it) {
     <span class="resize-handle" data-dir="s" title="拖动调整高度"></span>
   `;
   const img = el.querySelector(".card-img");
-  if (it.width && it.height) {
-    el.style.aspectRatio = `${it.width} / ${it.height}`;
-  }
+  // 注意：flex 布局下不再依赖 aspectRatio。父容器宽高由 renderItems 显式设置，
+  // wrap 通过 flex:1 自动填满剩余空间，img 通过 max-width/max-height + object-fit:contain 保持比例。
   loadImageFor(it, img);
   bindCardEvents(el, it);
   return el;
