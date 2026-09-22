@@ -169,6 +169,12 @@ async function apiRenameFolder(id, name) {
 async function apiDeleteFolder(id) {
   if (isTauri()) await mi("delete_image_folder", { id });
   lsFolders = lsFolders.filter(x => x.id !== id); lsSave(lsFolders);
+  // 先按 folder_id 找出该夹下所有 item，把它们对应的玻璃画布图片缓存
+  // (glassCanvas.img.{folderId}.{fileName}) 一起清掉，避免删除夹子后残留脏数据。
+  const orphans = lsItems.filter(x => x.folder_id === id);
+  for (const it of orphans) {
+    try { localStorage.removeItem(`glassCanvas.img.${id}.${it.file_name}`); } catch {}
+  }
   lsItems = lsItems.filter(x => x.folder_id !== id); lsSaveItems(lsItems);
   if (activeFolderId === id) {
     activeFolderId = null; activeFolder = null;
@@ -336,7 +342,7 @@ function createCardEl(it) {
     <div class="card-tools">
       <button class="tool-btn" data-act="copy" title="复制">⧉</button>
       <button class="tool-btn" data-act="top" title="置顶">⤒</button>
-      <button class="tool-btn" data-act="rm" title="删除">✕</button>
+      <button class="tool-btn" data-act="rm" title="删除">×</button>
     </div>
     <span class="resize-handle" data-dir="se" title="拖动调整大小"></span>
     <span class="resize-handle" data-dir="e" title="拖动调整宽度"></span>
@@ -562,9 +568,8 @@ async function removeItem(id) {
   selection.delete(id);
   const el = itemEls.get(id);
   if (el) { el.remove(); itemEls.delete(id); }
-  // 同步侧栏计数（之前漏了这一步，删完图片侧栏数字一直不变）
-  const fld = folders.find(x => x.id === activeFolderId);
-  if (fld) fld.total = Math.max(0, (fld.total || 0) - 1);
+  // 同步侧栏计数到内存 folders[] 和 localStorage（之前只改内存，刷新后又归零）
+  syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
   renderFolderList();
   updateEmpty();
   updateHeader();
@@ -611,9 +616,8 @@ async function uploadFile(file) {
     items.push(it);
     debouncedSaveItem(it.id);
     renderItems();
-    // 同步侧栏计数（之前只 renderFolderList 但 folders[].total 没更新，数字一直不变）
-    const fld = folders.find(x => x.id === activeFolder.id);
-    if (fld) fld.total = (fld.total || 0) + 1;
+    // 同步侧栏计数到内存 folders[] 和 localStorage（之前只更新了内存，刷新后又归 0）
+    syncFolderTotal(folders.find(x => x.id === activeFolder.id), items.length);
     renderFolderList();
     toast(`已添加「${title.slice(0, 16)}」`);
   } catch (e) {
@@ -883,6 +887,10 @@ async function setActiveFolder(id) {
     view = { x: 40, y: 40, zoom: 1 };
   }
   items = await apiListItems(id);
+  // 之前 folders[].total 只由后端写，但 apiSaveImage 从不在后端更新它，
+  // 浏览器刷新后侧栏就一直显示 0。这里按当前 items 数回填并同步到 localStorage，
+  // 让侧栏计数在刷新后也能正确显示。
+  syncFolderTotal(f, items.length);
   // 清理旧卡片 DOM
   for (const [, el] of itemEls) el.remove();
   itemEls.clear();
@@ -890,6 +898,19 @@ async function setActiveFolder(id) {
   applyView();
   renderFolderList();
   renderItems();
+}
+
+// 把某个夹的当前图片数写回内存 folders[] 和 localStorage（浏览器模式），
+// 让侧栏计数在页面刷新后仍然是对的。后端模式的 folders[].total 由后端负责。
+function syncFolderTotal(f, n) {
+  if (!f) return;
+  f.total = n;
+  // 注意：apiListFolders 在浏览器模式返回 lsFolders.slice()，folders[] 里的对象
+  // 与 lsFolders[] 里的对象是同一个引用，f.total = n 已经把 lf.total 改了。
+  // 所以判断条件不能用 lf.total !== n（永远 false，永远不会写盘）。
+  // 这里只要找到对应条目就强制写入，保证 localStorage 与内存一致。
+  const lf = lsFolders.find(x => x.id === f.id);
+  if (lf) { lf.total = n; lsSave(lsFolders); }
 }
 
 /* ---------- 画布事件：平移 / 缩放 / 双击上传 ---------- */

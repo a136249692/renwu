@@ -119,11 +119,30 @@ function toast(msg) {
   clearTimeout(_toastTimer);
   _toastTimer = setTimeout(() => t.classList.remove("show"), 3500);
 }
+// 过滤明显和"数据读写"无关的噪音异常，避免误弹 toast。
+// 例如 Vite HMR WebSocket 在浏览器预览（非 Tauri）时会报
+// "WebSocket closed without opened."——这跟应用数据保存完全无关，
+// 但如果不拦下，用户一打开页面就会看到"读取或保存失败"这种误导提示。
+function isDataRelatedError(msg) {
+  const m = String(msg || "");
+  const noisePatterns = [
+    /WebSocket/i, /ECONNREFUSED/i, /ERR_CONNECTION/,
+    /Cannot read properties of (undefined|null) in Strict Mode/,
+    /TextSelection/i, /\[vite\]/i, /Failed to fetch/i,
+    /Failed to load resource/i, /AbortError/i,
+  ];
+  for (const p of noisePatterns) if (p.test(m)) return false;
+  // 兜底：只提示和数据库/存储/文件相关的关键词，避免误伤
+  return /(数据库|存储|路径|权限|save|load|read|write|sqlite|image|folder|task|backup|invoke)/i.test(m);
+}
 window.addEventListener("unhandledrejection", ev => {
   const r = ev.reason;
   const m = (r && (r.message || r.toString())) || String(r) || "未知错误";
+  if (!isDataRelatedError(m)) {
+    console.warn("[玻光画布] 未处理的非数据类异常（已忽略）:", m);
+    return;
+  }
   console.error("[玻光画布] 未处理的保存/读取错误:", m);
-  // 只提示一次保存类错误，避免刷屏
   toast("读取或保存失败，请检查路径权限。详情见开发者面板: " + m.slice(0, 40));
 });
 
