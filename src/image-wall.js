@@ -43,6 +43,51 @@ function nowTs() { return Date.now(); }
 function uid() { return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8); }
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
+/* ---------- toast 反馈 ----------
+ * 与 main.js 的 toast 函数保持同一套 DOM 节点（#app-toast），
+ * 让上传/删除/恢复等关键操作的成败对用户可见，而不是仅靠 console.warn。 */
+let _toastTimer = null;
+function toast(msg, ms) {
+  let t = document.getElementById("app-toast");
+  if (!t) {
+    t = document.createElement("div");
+    t.id = "app-toast";
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove("show"), ms || 3000);
+}
+
+/* ---------- 图片夹顺序（localStorage，与任务夹同样的 orderMap 模式） ----------
+ * 之前 list_image_folders 只按 created_at ASC 排序，没有任何重排能力，
+ * 用户拖动时完全无反应。这里和 main.js 的 getFolderOrderMap 保持一致的
+ * 模式：把拖拽后的视觉顺序写到 localStorage，renderFolderList 时据此排序。 */
+const IMAGE_FOLDER_ORDER_KEY = "glassCanvas.imageFolderOrder";
+function getImageFolderOrderMap() {
+  try { return JSON.parse(localStorage.getItem(IMAGE_FOLDER_ORDER_KEY) || "{}"); }
+  catch { return {}; }
+}
+function saveImageFolderOrderMap(map) {
+  try { localStorage.setItem(IMAGE_FOLDER_ORDER_KEY, JSON.stringify(map)); } catch {}
+}
+function applyImageFolderOrder(list) {
+  const m = getImageFolderOrderMap();
+  const keys = Object.keys(m);
+  // 没有 orderMap 信息时保持后端返回的原始顺序（created_at ASC）
+  if (!keys.length) return list;
+  return list.slice().sort((a, b) => {
+    const oa = m[String(a.id)];
+    const ob = m[String(b.id)];
+    if (oa == null && ob == null) return 0;
+    if (oa == null) return 1;
+    if (ob == null) return -1;
+    if (oa !== ob) return oa - ob;
+    return 0; // 相等时保留数组原顺序（stable sort）
+  });
+}
+
 /* ---------- DOM 引用 ---------- */
 const confirmModal    = $("confirm-modal");
 const confirmTitle    = $("confirm-title");
@@ -496,18 +541,34 @@ async function removeItem(id) {
     { title: "删除图片", okText: "删除" }
   );
   if (!ok) return;
-  await apiDeleteItem(id);
+  try {
+    await apiDeleteItem(id);
+  } catch (err) {
+    console.error("[图片墙] 删除图片失败:", err);
+    toast("删除失败：" + (err.message || String(err)).slice(0, 60));
+    return;
+  }
   items = items.filter(x => x.id !== id);
   selection.delete(id);
   const el = itemEls.get(id);
   if (el) { el.remove(); itemEls.delete(id); }
+  // 同步侧栏计数（之前漏了这一步，删完图片侧栏数字一直不变）
+  const fld = folders.find(x => x.id === activeFolderId);
+  if (fld) fld.total = Math.max(0, (fld.total || 0) - 1);
+  renderFolderList();
   updateEmpty();
   updateHeader();
+  toast("已删除");
 }
 
 /* ---------- 图片上传 ---------- */
 async function uploadFile(file) {
-  if (!activeFolder) return;
+  if (!activeFolder) {
+    // 没有激活的图片夹时，先建一个再上传（保持用户体验：直接拖文件进去也能用）
+    const f = await apiCreateFolder("图片夹 " + (folders.length + 1));
+    folders.push(f);
+    await setActiveFolder(f.id);
+  }
   if (!file || !/^image\//.test(file.type || "")) {
     // 有些截图粘贴 mime 可能是空
     if (!file || (file.type && !file.type.startsWith("image"))) return;
@@ -519,7 +580,7 @@ async function uploadFile(file) {
     const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
     const title = (file.name.replace(/\.[^.]+$/, "") || "").trim() || "图片";
     const it = await apiSaveImage(activeFolder.id, fileName, title, bytes);
-    if (!it) return;
+    if (!it) { toast("上传失败：未返回图片信息", 3500); return; }
     // 拿到宽高用于初始布局
     const dim = await probeImageSize(bytes, file.type || guessMime(fileName));
     // 放置在画布中心
@@ -537,10 +598,14 @@ async function uploadFile(file) {
     items.push(it);
     debouncedSaveItem(it.id);
     renderItems();
-    // 列表项数字计数刷新
+    // 同步侧栏计数（之前只 renderFolderList 但 folders[].total 没更新，数字一直不变）
+    const fld = folders.find(x => x.id === activeFolder.id);
+    if (fld) fld.total = (fld.total || 0) + 1;
     renderFolderList();
+    toast(`已添加「${title.slice(0, 16)}」`);
   } catch (e) {
     console.warn("[图片墙] 上传失败:", e);
+    toast("上传失败：" + (e.message || String(e)).slice(0, 60));
   }
 }
 function probeImageSize(bytes, mime) {
@@ -569,43 +634,178 @@ function updateHeader() {
 async function renderFolderList() {
   if (!imageFolderListEl) return;
   imageFolderListEl.innerHTML = "";
-  for (const f of folders) {
+  // 拖拽顺序在本地（orderMap），后端只负责存夹本身
+  const ordered = applyImageFolderOrder(folders);
+  for (const f of ordered) {
     const li = document.createElement("li");
-    li.className = "folder-item" + (f.id === activeFolderId ? " active" : "");
+    li.className = "folder-item";
+    if (f.id === activeFolderId) li.classList.add("active");
     li.dataset.id = String(f.id);
     li.innerHTML = `
-      <span class="folder-name">${esc(f.name)}</span>
-      <span class="folder-count">${f.total ?? 0}</span>
-      <button class="folder-del" title="删除" aria-label="删除图片夹">✕</button>
+      <span class="name">${esc(f.name)}</span>
+      <span class="cnt">${f.total ?? 0}</span>
+      <button class="rm" title="删除" aria-label="删除图片夹">✕</button>
     `;
     li.addEventListener("click", e => {
-      if (e.target.closest(".folder-del")) { e.stopPropagation(); return; }
+      if (e.target.closest(".rm")) { e.stopPropagation(); return; }
       setActiveFolder(f.id);
     });
     li.addEventListener("dblclick", e => {
-      if (e.target.closest(".folder-del")) return;
+      if (e.target.closest(".rm")) return;
       startRenameFolder(li, f);
     });
-    li.querySelector(".folder-del").addEventListener("click", async e => {
+    // 指针拖动重排：拖整个 li 即可（与任务夹一致）
+    li.addEventListener("pointerdown", e => startImageFolderDrag(e, f.id, li));
+    li.querySelector(".rm").addEventListener("click", async e => {
       e.stopPropagation();
       const ok = await askConfirm(
         `确定删除「${esc(f.name)}」？<br/>其中的 <b>${f.total ?? 0}</b> 张图片也会被一并删除，此操作不可恢复。`,
         { title: "删除图片夹", okText: "删除" }
       );
       if (!ok) return;
-      await apiDeleteFolder(f.id);
-      folders = folders.filter(x => x.id !== f.id);
-      await loadFolders(true);
+      try {
+        await apiDeleteFolder(f.id);
+        folders = folders.filter(x => x.id !== f.id);
+        await loadFolders(true);
+        toast(`已删除「${f.name}」`);
+      } catch (err) {
+        console.error("[图片墙] 删除图片夹失败:", err);
+        toast("删除失败：" + (err.message || String(err)).slice(0, 60));
+      }
     });
     imageFolderListEl.appendChild(li);
   }
+}
+
+/* ---------- 图片夹拖动重排 ----------
+ * 复用与 main.js startFolderPointerDrag 完全一致的 pointer 拖拽模式：
+ * pointerdown + setPointerCapture + window pointermove/pointerup。
+ * HTML5 DnD 在 WebView2 打包后侧栏 li 作为拖源不稳定，pointer 模式跨夹移动那块
+ * 已经验证可用，这里沿用同一套交互。
+ *
+ * 交互细节：
+ * - 拖动前 4px 阈值内不当拖动，仅当 pointermove 超过阈值才激活拖拽视觉；
+ * - 移动时用 elementFromPoint 命中最近的 .folder-item，按鼠标相对中线挂
+ *   fold-drop-before / fold-drop-after class 显示插入指示线；
+ * - 松手时按当前 hover 目标调用 reorderImageFolders(srcId, targetId)。 */
+function startImageFolderDrag(e, srcId, srcEl) {
+  // 删除按钮、重命名输入框上不启动拖动
+  if (e.target.closest(".rm")) return;
+  if (e.target.closest("input")) return;
+  if (e.button != null && e.button !== 0) return;
+  // 已经在拖动另一个夹
+  if (_imgFoldDragSrc != null) return;
+
+  e.preventDefault();
+  const startX = e.clientX, startY = e.clientY;
+  let activated = false;
+  let lastX = startX, lastY = startY;
+
+  try { srcEl.setPointerCapture(e.pointerId); } catch (_) {}
+
+  const onMove = (ev) => {
+    const dx = ev.clientX - startX, dy = ev.clientY - startY;
+    if (!activated) {
+      if (Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+      activated = true;
+      _imgFoldDragSrc = srcId;
+      _imgFoldDragSrcEl = srcEl;
+      srcEl.classList.add("fold-dragging");
+      imageFolderListEl.classList.add("reordering");
+    }
+    ev.preventDefault();
+    lastX = ev.clientX; lastY = ev.clientY;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tgt = el ? (el.classList.contains("folder-item") ? el : el.closest(".folder-item")) : null;
+    imageFolderListEl.querySelectorAll(".fold-drop-before,.fold-drop-after").forEach(x => {
+      x.classList.remove("fold-drop-before"); x.classList.remove("fold-drop-after");
+    });
+    if (!tgt || Number(tgt.dataset.id) === Number(srcId)) return;
+    const r = tgt.getBoundingClientRect();
+    const isVertical = getComputedStyle(imageFolderListEl).flexDirection !== "row";
+    const pastMid = isVertical
+      ? (ev.clientY > r.top + r.height / 2)
+      : (ev.clientX > r.left + r.width / 2);
+    tgt.classList.add(pastMid ? "fold-drop-after" : "fold-drop-before");
+  };
+
+  const onUp = (ev) => {
+    try { srcEl.releasePointerCapture(e.pointerId); } catch (_) {}
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tgt = activated && el ? (el.classList.contains("folder-item") ? el : el.closest(".folder-item")) : null;
+    const tgtId = tgt ? Number(tgt.dataset.id) : null;
+    srcEl.classList.remove("fold-dragging");
+    imageFolderListEl.classList.remove("reordering");
+    imageFolderListEl.querySelectorAll(".fold-drop-before,.fold-drop-after").forEach(x => {
+      x.classList.remove("fold-drop-before"); x.classList.remove("fold-drop-after");
+    });
+    const wasDragging = activated;
+    const dragSrc = _imgFoldDragSrc;
+    _imgFoldDragSrc = null; _imgFoldDragSrcEl = null;
+    if (wasDragging) {
+      // 用 _imgFoldDragLastX/Y 记录落点，让 reorderImageFolders 判断 before/after
+      _imgFoldDragLastX = lastX;
+      _imgFoldDragLastY = lastY;
+      if (tgtId != null && tgtId !== Number(dragSrc)) reorderImageFolders(dragSrc, tgtId);
+    }
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
+}
+let _imgFoldDragSrc = null;
+let _imgFoldDragSrcEl = null;
+let _imgFoldDragLastX = 0;
+let _imgFoldDragLastY = 0;
+
+/* 拖动图片夹到目标位置：把源元素插到目标之前/之后。
+ * 与任务夹 reorderFolders 一致：
+ * 1) 从当前 DOM 读取可见顺序（DOM 就是 renderFolderList 刚渲染出来的，最权威）；
+ * 2) 按视觉顺序重排 orderMap，让 index 0..n-1 连续；
+ * 3) 不再动 folders 数组（它是后端原始顺序，不动它更安全）。 */
+function reorderImageFolders(srcId, targetId) {
+  // 用 DOM 中的当前顺序作为基准（含已排序的视觉顺序）
+  const items = Array.from(imageFolderListEl.querySelectorAll(".folder-item"))
+    .map(li => Number(li.dataset.id));
+  const srcIdx = items.indexOf(srcId);
+  const tgtIdx = items.indexOf(targetId);
+  if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+
+  // 判断落点在目标上方还是下方
+  const tgtEl = imageFolderListEl.querySelector(`li[data-id="${targetId}"]`);
+  let pastMid = false;
+  if (tgtEl) {
+    const r = tgtEl.getBoundingClientRect();
+    const isVertical = getComputedStyle(imageFolderListEl).flexDirection !== "row";
+    pastMid = isVertical
+      ? (_imgFoldDragLastY > r.top + r.height / 2)
+      : (_imgFoldDragLastX > r.left + r.width / 2);
+  }
+
+  // 从 items 移除源
+  items.splice(srcIdx, 1);
+  // 重新定位目标在新数组中的下标（因为移除后可能左移）
+  let insertAt = items.indexOf(targetId);
+  if (insertAt < 0) return;
+  if (pastMid) insertAt += 1;
+  items.splice(insertAt, 0, srcId);
+
+  // 写回 orderMap：让 index 从 0 连续递增
+  const map = {};
+  items.forEach((id, i) => { map[String(id)] = i; });
+  saveImageFolderOrderMap(map);
+  renderFolderList();
 }
 let _renamingFolderId = null;
 function startRenameFolder(li, f) {
   if (_renamingFolderId !== null) return;
   _renamingFolderId = f.id;
   const old = f.name;
-  const span = li.querySelector(".folder-name");
+  const span = li.querySelector(".name");
   const input = document.createElement("input");
   input.type = "text";
   input.maxLength = 30;
@@ -716,10 +916,9 @@ function bindCanvasEvents() {
 
   imageCanvas.addEventListener("dblclick", e => {
     if (e.target !== imageCanvas && e.target !== imageWorld) return;
-    if (!activeFolder) {
-      newImageFolderBtn && newImageFolderBtn.click();
-      return;
-    }
+    // 之前写错了：没有夹时只点了"新建夹"按钮，弹文件框的步骤根本没做，
+    // 用户双击空白后只多出一个空夹、没有任何上传动作（这是"图片无法上传"的根因之一）。
+    // 正确做法：直接弹文件选择；选完走 imageFileInput change → uploadFile 自动建夹。
     imageFileInput.click();
   });
 
@@ -738,11 +937,7 @@ function bindCanvasEvents() {
     imageCanvas.classList.remove("drop-hover");
     const files = Array.from(e.dataTransfer.files || []).filter(f => /^image\//.test(f.type));
     if (!files.length) return;
-    if (!activeFolder) {
-      // 没有图片夹时先建一个
-      await newFolderAndUpload(files);
-      return;
-    }
+    // uploadFile 内部会在没有激活夹时自动创建夹，所以这里直接遍历上传即可
     for (const f of files) await uploadFile(f);
   });
 
@@ -750,7 +945,6 @@ function bindCanvasEvents() {
     const files = Array.from(e.target.files || []);
     e.target.value = "";
     if (!files.length) return;
-    if (!activeFolder) { await newFolderAndUpload(files); return; }
     for (const f of files) await uploadFile(f);
   });
 
@@ -770,22 +964,29 @@ function bindCanvasEvents() {
     }
     if (!imgs.length) return;
     e.preventDefault();
-    if (!activeFolder) { await newFolderAndUpload(imgs); return; }
     for (const f of imgs) await uploadFile(f);
   });
 }
 
 async function newFolderAndUpload(files) {
-  const f = await apiCreateFolder("图片夹 " + (folders.length + 1));
-  folders.push(f);
-  await setActiveFolder(f.id);
+  // 保留作为兼容路径：极少数地方（外部入口）可能直接调用。
+  // 实际上传走 uploadFile，它会处理"没有激活夹"的情况。
+  if (!files || !files.length) return;
+  if (!activeFolder) {
+    const f = await apiCreateFolder("图片夹 " + (folders.length + 1));
+    folders.push(f);
+    await setActiveFolder(f.id);
+  }
   for (const file of files) await uploadFile(file);
 }
 
 /* ---------- 工具栏 ---------- */
 function bindToolbar() {
   if (imageAddBtn) imageAddBtn.addEventListener("click", () => {
-    if (!activeFolder) { newImageFolderBtn && newImageFolderBtn.click(); return; }
+    // 之前这里写错了：没有夹时调 newImageFolderBtn.click() 只创建空夹，
+    // 用户选中的文件根本没机会被上传（点上传按钮后没反应就是这个 bug）。
+    // 正确做法：直接弹文件选择框；用户选了文件再走 uploadFile，
+    // uploadFile 内部会在没有夹时自动创建夹。
     imageFileInput.click();
   });
   if (imageZoomInBtn) imageZoomInBtn.addEventListener("click", () => {

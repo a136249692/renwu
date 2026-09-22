@@ -1,5 +1,8 @@
+mod backup;
 mod db;
 
+use std::collections::HashMap;
+use std::path::Path;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -16,6 +19,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_folders,
@@ -57,7 +61,9 @@ pub fn run() {
             save_image,
             update_image_item,
             delete_image_item,
-            read_image_file
+            read_image_file,
+            create_backup,
+            restore_backup
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -397,4 +403,35 @@ fn delete_image_item(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(
 fn read_image_file(app: tauri::AppHandle, folder_id: i64, file_path: String) -> Result<Vec<u8>, String> {
     let dir = app_data_dir(&app)?;
     db::read_image_file(&dir, folder_id, &file_path)
+}
+
+/// 全量备份：数据库（含 WAL 折叠快照）+ images 图片目录 + 前端 localStorage 配置，
+/// 全部打包为 zip 写入 dest_path（用户通过保存对话框选择的位置）。
+#[tauri::command]
+fn create_backup(
+    app: tauri::AppHandle,
+    state: DbState,
+    dest_path: String,
+    storage: Option<HashMap<String, String>>,
+) -> Result<backup::BackupReport, String> {
+    let data_dir = app_data_dir(&app)?;
+    let config_dir = data_dir.join("config");
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    let storage = storage.unwrap_or_default();
+    backup::create_backup(&conn, &data_dir, Some(&config_dir), Path::new(&dest_path), storage)
+}
+
+/// 从备份 zip 还原数据库、图片与配置。返回 storage 映射（前端 localStorage 快照），
+/// 前端据此写回后再调用重启，App 重新加载新数据库与配置。
+#[tauri::command]
+fn restore_backup(
+    app: tauri::AppHandle,
+    src_path: String,
+) -> Result<backup::RestoreReport, String> {
+    use std::fs;
+    let data_dir = app_data_dir(&app)?;
+    let config_dir = data_dir.join("config");
+    let db_path = data_dir.join("tasks.db");
+    let bytes = fs::read(&src_path).map_err(|e| format!("读取备份失败: {e}"))?;
+    backup::restore_from_zip(&bytes, &data_dir, Some(&config_dir), &db_path)
 }

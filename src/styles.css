@@ -169,7 +169,7 @@ body.is-dragging .bg::after { opacity: 0; }
 }
 .folder-item.active .cnt { background: var(--accent-soft); color: var(--accent-deep); }
 .folder-item .rm {
-  opacity: 0; border: none; background: transparent; color: var(--faint);
+  opacity: 0.45; border: none; background: transparent; color: var(--faint);
   cursor: var(--cursor-arrow); font-size: 15px; line-height: 1; padding: 2px 5px; border-radius: 6px;
   transition: all 0.18s var(--ease);
 }
@@ -240,7 +240,9 @@ body.is-dragging .bg::after { opacity: 0; }
   font-size: 12px; font-weight: 600; font-family: inherit; line-height: 1;
   padding: 7px 0; border-radius: 8px; cursor: var(--cursor-arrow);
   transition: all 0.2s var(--ease); white-space: nowrap;
+  display: inline-flex; align-items: center; justify-content: center; gap: 5px;
 }
+.mode-tab .tab-ico { flex: none; width: 14px; height: 14px; }
 .mode-tab:hover { color: var(--text); }
 .mode-tab.active {
   background: #fff; color: var(--text-strong);
@@ -472,6 +474,18 @@ body.show-card-actions .block-zoom { opacity: 1; }
   line-height: 1.75;
   min-height: 60px;
 }
+/* 已完成任务的行内紧凑布局在放大态下也要从顶部开始：
+   .block.row 用 display:flex; align-items:center 让标题/元信息在
+   紧凑行里垂直居中。放大后容器变成 90vh 大块时如果沿用 align-items:
+   center 会把内容推到垂直中部（用户实际反馈的「内容居中」问题）。
+   这里把放大态的 .row 恢复成 flex-start 顶对齐；同时把 .block-zoom
+   在放大态本来就 hidden，不影响。 */
+.block.row.zoomed {
+  align-items: flex-start;
+}
+.block.row.zoomed .block-meta {
+  margin-top: 4px;
+}
 .block.zoomed .block-del,
 .block.zoomed .block-zoom,
 .block.zoomed .block-check {
@@ -670,6 +684,8 @@ body.show-card-actions .block-del { opacity: 1; }
 }
 .link-btn:hover { background: rgba(59, 110, 245, 0.1); }
 .link-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.link-btn.danger-text { color: #e5484d; border-color: #e5484d; }
+.link-btn.danger-text:hover { background: rgba(229, 72, 77, 0.12); }
 .setting-label { flex: 1; font-size: 13px; line-height: 1.5; color: var(--text); }
 .setting-label small { display: block; font-size: 11px; color: var(--faint); margin-top: 3px; font-weight: 400; }
 .switch {

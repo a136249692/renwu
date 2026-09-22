@@ -1,7 +1,7 @@
 {
   "name": "task-manager",
   "private": true,
-  "version": "1.0.19",
+  "version": "1.0.20",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.5.0",
+    "@tauri-apps/plugin-dialog": "^2.7.3",
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.11.0"
   },

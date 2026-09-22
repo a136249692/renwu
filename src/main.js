@@ -2385,6 +2385,11 @@ function applySettings() {
   // 数据目录按钮仅桌面端可用；浏览器预览模式隐藏（避免误点）
   const dd = $("open-data-dir");
   if (dd) dd.hidden = !isTauri();
+  // 完整备份 / 恢复按钮同样仅桌面端可用
+  for (const id of ["backup-btn", "restore-btn"]) {
+    const b = document.getElementById(id);
+    if (b) b.hidden = !isTauri();
+  }
   // 更新相关按钮仅桌面端可用；浏览器预览模式隐藏
   const cu = $("check-update-btn");
   if (cu) cu.hidden = !isTauri();
@@ -2567,6 +2572,81 @@ $("import-file").addEventListener("change", async e => {
     } catch (err) { alert("导入失败：" + err.message); }
   };
   reader.readAsText(file); e.target.value = "";
+});
+
+/* ---------- 完整备份 / 恢复 ----------
+ * 桌面端把「SQLite 数据库 + images 图片目录 + localStorage 全部配置」打成一个 zip，
+ * 拷贝到其他电脑后「从备份恢复」即可整体迁移。纯前端预览（无 Tauri）隐藏这两个入口。 */
+function collectLocalStorageSnapshot() {
+  const snap = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k) snap[k] = localStorage.getItem(k);
+  }
+  return snap;
+}
+function applyStorageSnapshot(snap) {
+  if (!snap) return;
+  // 先清空现有键，避免残留的旧配置与新快照混在一起
+  const keep = new Set(Object.keys(snap));
+  for (let i = localStorage.length - 1; i >= 0; i--) {
+    const k = localStorage.key(i);
+    if (k && !keep.has(k)) localStorage.removeItem(k);
+  }
+  for (const [k, v] of Object.entries(snap)) localStorage.setItem(k, v);
+}
+function stamp() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(2) + " MB";
+}
+$("backup-btn").addEventListener("click", async () => {
+  const btn = $("backup-btn");
+  try {
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const dest = await save({
+      defaultPath: `玻光画布备份-${stamp()}.zip`,
+      filters: [{ name: "Zip", extensions: ["zip"] }],
+    });
+    if (!dest) return; // 用户取消
+    btn.disabled = true; btn.textContent = "备份中…";
+    const report = await invokeImpl("create_backup", {
+      destPath: dest,
+      storage: collectLocalStorageSnapshot(),
+    });
+    toast(`备份完成：${report.dbSize} 字节数据库 + ${report.imageCount} 张图片（${fmtSize(report.size)}）`);
+  } catch (err) {
+    console.error("[玻光画布] 备份失败", err);
+    toast("备份失败：" + (err.message || String(err)).slice(0, 60));
+  } finally {
+    btn.disabled = false; btn.textContent = "备份";
+  }
+});
+$("restore-btn").addEventListener("click", async () => {
+  const btn = $("restore-btn");
+  if (!window.confirm("从备份恢复将覆盖当前所有数据（数据库、图片与配置），且恢复完成后会重启应用。确定继续？")) return;
+  try {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const file = await open({ multiple: false, filters: [{ name: "Zip", extensions: ["zip"] }] });
+    if (!file) return; // 用户取消
+    btn.disabled = true; btn.textContent = "恢复中…";
+    const report = await invokeImpl("restore_backup", { srcPath: file });
+    // 写回 localStorage 配置
+    if (report && report.storage) applyStorageSnapshot(report.storage);
+    toast("恢复完成，正在重启…");
+    const { restart } = await import("@tauri-apps/plugin-process");
+    await restart();
+  } catch (err) {
+    console.error("[玻光画布] 恢复失败", err);
+    toast("恢复失败：" + (err.message || String(err)).slice(0, 80));
+    btn.disabled = false; btn.textContent = "恢复";
+  }
 });
 
 /* ---------- 滚动位置记忆 ----------
