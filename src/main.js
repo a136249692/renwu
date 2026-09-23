@@ -207,8 +207,22 @@ function setDoneSortMode(mode) {
 
 /* ---------- localStorage 模拟后端（浏览器预览用） ---------- */
 function lsLoadAll() {
-  try { return JSON.parse(localStorage.getItem("glassCanvas.v1") || "{}"); }
-  catch { return {}; }
+  try {
+    const d = JSON.parse(localStorage.getItem("glassCanvas.v1") || "{}");
+    // 三态迁移兜底：旧数据只有 is_completed，缺 stage 字段。
+    // 首次读取时把 stage 补齐（is_completed=1 → 'done'，其余 → 'todo'）。
+    if (d && Array.isArray(d.tasks)) {
+      let changed = false;
+      for (const t of d.tasks) {
+        if (t.stage !== "todo" && t.stage !== "review" && t.stage !== "done") {
+          t.stage = t.is_completed ? "done" : "todo";
+          changed = true;
+        }
+      }
+      if (changed) localStorage.setItem("glassCanvas.v1", JSON.stringify(d));
+    }
+    return d;
+  } catch { return {}; }
 }
 function lsSaveAll(data) {
   localStorage.setItem("glassCanvas.v1", JSON.stringify(data));
@@ -243,16 +257,25 @@ function composeStickyContent(title, body) {
 }
 
 /* ---------- 统一数据映射：后端 snake_case → 前端 block 对象 ---------- */
+/* stage: 'todo' | 'review' | 'done'。旧数据（无 stage 字段）兜底到 'todo'/'done'。 */
+function normalizeStage(s) {
+  if (s === "review") return "review";
+  if (s === "done") return "done";
+  return "todo";
+}
 function mapTask(t) {
+  const stage = normalizeStage(t.stage);
+  const done = stage === "done";
   return {
     id: t.id,
     folderId: t.folder_id,
     title: t.content,
-    done: !!t.is_completed,
+    done,
+    stage,
     createdAt: t.created_at,
     x: t.x || 0,
     y: t.y || 0,
-    row: !!t.is_completed,
+    row: stage !== "todo",
     w: 0,
   };
 }
@@ -262,7 +285,10 @@ const api = {
   async getFolders() {
     if (isTauri()) {
       const list = await invoke("get_folders");
-      if (list) return list.map(f => ({ ...f, dividerY: getDividerY(f.id) }));
+      if (list) return list.map(f => {
+        const pos = getDividerY(f.id) || { doneY: 0, reviewY: 0 };
+        return { ...f, dividerY: pos.doneY, reviewY: pos.reviewY };
+      });
     }
     const d = lsLoadAll();
     const fs = d.folders || [];
@@ -281,10 +307,11 @@ const api = {
   async createFolder(name) {
     if (isTauri()) {
       const f = await invoke("create_folder", { name });
-      if (f) return { ...f, dividerY: getDividerY(f.id) };
+      const pos = getDividerY(f.id) || { doneY: 0, reviewY: 0 };
+      return { ...f, dividerY: pos.doneY, reviewY: pos.reviewY };
     }
     const d = lsLoadAll();
-    const f = { id: nextMockId(), name: name.trim() || "未命名", created_at: Date.now(), total: 0, completed: 0, dividerY: 0 };
+    const f = { id: nextMockId(), name: name.trim() || "未命名", created_at: Date.now(), total: 0, completed: 0, dividerY: 0, reviewY: 0 };
     d.folders = d.folders || []; d.folders.push(f); lsSaveAll(d);
     return f;
   },
@@ -326,7 +353,7 @@ const api = {
       if (t) return mapTask(t);
     }
     const d = lsLoadAll();
-    const t = { id: nextMockId(), folder_id: folderId, content: title, is_completed: 0, created_at: Date.now(), sort_order: 0, x, y };
+    const t = { id: nextMockId(), folder_id: folderId, content: title, is_completed: 0, stage: "todo", created_at: Date.now(), sort_order: 0, x, y };
     d.tasks = d.tasks || []; d.tasks.push(t); lsSaveAll(d);
     return mapTask(t);
   },
@@ -364,6 +391,7 @@ const api = {
         id: memB.id, folder_id: memB.folderId,
         content: memB.title || "",
         is_completed: memB.done ? 1 : 0,
+        stage: memB.stage || (memB.done ? "done" : "todo"),
         sort_order: memB.sort_order || 0,
         x: memB.x ?? 16, y: memB.y ?? 0,
       };
@@ -380,6 +408,7 @@ const api = {
             id: t.id, folder_id: t.folder_id,
             content: t.content || "",
             is_completed: t.is_completed ? 1 : 0,
+            stage: normalizeStage(t.stage),
             sort_order: t.sort_order || 0,
             x: t.x ?? 16, y: t.y ?? 0,
           };
@@ -395,11 +424,12 @@ const api = {
     }
     if (!src || Number(src.folder_id) === Number(targetFolderId)) return null;
     if (isTauri()) {
-      const nb = await invoke("create_task", {
+      const nb = await invoke("create_task_with_stage", {
         folderId: targetFolderId,
         content: src.content || "",
         positionX: src.x ?? 16,
         positionY: src.y ?? 0,
+        stage: src.stage || "todo",
       });
       await invoke("delete_task", { id: src.id });
       return nb ? mapTask(nb) : null;
@@ -409,7 +439,8 @@ const api = {
       id: nextMockId(),
       folder_id: targetFolderId,
       content: src.content || "",
-      is_completed: src.is_completed ? 1 : 0,
+      is_completed: (src.stage === "done") ? 1 : 0,
+      stage: normalizeStage(src.stage),
       created_at: Date.now(),
       sort_order: src.sort_order || 0,
       x: src.x ?? 16,
@@ -427,7 +458,26 @@ const api = {
     }
     const d = lsLoadAll();
     const t = (d.tasks || []).find(x => x.id === id);
-    if (t) t.is_completed = isCompleted ? 1 : 0;
+    if (t) {
+      t.is_completed = isCompleted ? 1 : 0;
+      t.stage = isCompleted ? "done" : "todo";
+    }
+    lsSaveAll(d);
+    return mapTask(t);
+  },
+  /* 三态切换：'todo' / 'review' / 'done'。is_completed 与 stage 保持一致：只有 done 才 1。 */
+  async setStage(id, stage) {
+    const s = normalizeStage(stage);
+    if (isTauri()) {
+      const t = await invoke("set_stage", { id, stage: s });
+      if (t) return mapTask(t);
+    }
+    const d = lsLoadAll();
+    const t = (d.tasks || []).find(x => x.id === id);
+    if (t) {
+      t.stage = s;
+      t.is_completed = s === "done" ? 1 : 0;
+    }
     lsSaveAll(d);
     return mapTask(t);
   },
@@ -470,17 +520,26 @@ const api = {
   },
 };
 
-/* ---------- 分界线位置（localStorage，纯前端偏好） ---------- */
+/* ---------- 分界线位置（localStorage，纯前端偏好） ----------
+ * 两条分界线：doneY（已完成/待确认 之间）、reviewY（待确认/待完成 之间）。
+ * 存为 { doneY, reviewY }。旧版本存的是单数值（只表示 doneY），首次读取会自动迁移。
+ */
 function getDividerY(folderId) {
   try {
     const map = JSON.parse(localStorage.getItem(DIVIDER_KEY) || "{}");
-    return map[folderId] || 0;
-  } catch { return 0; }
+    const v = map[folderId];
+    if (v == null) return null;
+    if (typeof v === "object" && v !== null) {
+      return { doneY: Number(v.doneY) || 0, reviewY: Number(v.reviewY) || 0 };
+    }
+    // 旧数据：单个数值只表示 doneY，reviewY 未定义
+    return { doneY: Number(v) || 0, reviewY: 0 };
+  } catch { return null; }
 }
-function setDividerY(folderId, y) {
+function setDividerY(folderId, dy, reviewY) {
   try {
     const map = JSON.parse(localStorage.getItem(DIVIDER_KEY) || "{}");
-    map[folderId] = y;
+    map[folderId] = { doneY: dy || 0, reviewY: reviewY || 0 };
     localStorage.setItem(DIVIDER_KEY, JSON.stringify(map));
   } catch {}
 }
@@ -490,8 +549,6 @@ function setDividerY(folderId, y) {
  * ═══════════════════════════════════════════════════ */
 const GRID = 22;
 const SNAP = 5;
-const DIVIDER_RATIO = 0.3;
-const MIN_DIVIDER_Y = 56; // 已完成区最小高度，防止分界线贴顶塌缩
 const CANVAS_BOTTOM_PAD = 1000; // 画布底部留白（像素），保证待完成区下方还能继续向下滚动
 
 let folders = [];
@@ -528,6 +585,7 @@ const canvas = $("canvas");
 const board = $("board");
 const canvasWrap = $("canvas-wrap");
 const divider = $("divider");
+const reviewDivider = $("review-divider");
 const guideV = $("guide-v");
 const guideH = $("guide-h");
 const folderListEl = $("folder-list");
@@ -601,14 +659,15 @@ function isStickyFolderActive() {
 }
 
 /* ---------- 分界线 ----------
-   比例由 DIVIDER_RATIO 决定（0.3 = 完成区 30% / 待完成区 70%）。
-   分界线的像素值按文件夹缓存在 localStorage 的 DIVIDER_KEY 里；
-   relayout 会用 floor = max(已存值, 新默认) 保留较大的旧值，
-   所以比例一改必须清空旧缓存，否则分界线会被旧值锁住、改了也不动。 */
+   三段布局：已完成（顶部）/ 待确认（中部）/ 待完成（底部）。
+   - DONE_RATIO:    已完成区最小高度占比（18%）
+   - REVIEW_RATIO:  待确认区最小高度占比（12%）
+   - 剩余 70% 留给待完成区
+   分界线的像素值按文件夹缓存在 localStorage 的 DIVIDER_KEY 里，格式为 { doneY, reviewY }；
+   relayout 会用 max(默认值, 需要高度) 计算，比例一改必须清空旧缓存，
+   否则分界线会被旧值锁住、改了也不动。 */
 const DIVIDER_RATIO_KEY = "glassCanvas.dividerRatio";
-const DIVIDER_RATIO_VERSION = "r0.3";
-// 比例变更后清空旧的比例缓存：旧值（如 0.4 时代写入的）会在 relayout 里被
-// floor = max(已存值, 新默认) 当作下限保留，导致改比例后分界线纹丝不动。
+const DIVIDER_RATIO_VERSION = "r0.18-0.12-tristage";
 try {
   if (localStorage.getItem(DIVIDER_RATIO_KEY) !== DIVIDER_RATIO_VERSION) {
     localStorage.setItem(DIVIDER_RATIO_KEY, DIVIDER_RATIO_VERSION);
@@ -616,27 +675,41 @@ try {
   }
 } catch {}
 
-function defaultDividerY() {
+const DONE_RATIO = 0.18;
+const REVIEW_RATIO = 0.12;
+const MIN_DONE_H = 44;
+const MIN_REVIEW_H = 40;
+
+function defaultDoneY() {
   const h = canvas.clientHeight || window.innerHeight;
-  return Math.max(MIN_DIVIDER_Y, Math.round(h * DIVIDER_RATIO));
+  return Math.max(MIN_DONE_H, Math.round(h * DONE_RATIO));
+}
+function defaultReviewY() {
+  const h = canvas.clientHeight || window.innerHeight;
+  return Math.max(defaultDoneY() + MIN_REVIEW_H, Math.round(h * (DONE_RATIO + REVIEW_RATIO)));
 }
 function dividerY() {
   const f = folders.find(x => x.id === activeFolderId);
   if (f && f.dividerY) return f.dividerY;
-  return defaultDividerY();
+  return defaultDoneY();
+}
+function reviewY() {
+  const f = folders.find(x => x.id === activeFolderId);
+  if (f && f.reviewY) return f.reviewY;
+  return defaultReviewY();
 }
 function paintDivider() {
   divider.style.top = dividerY() + "px";
+  if (reviewDivider) reviewDivider.style.top = reviewY() + "px";
 }
 // 落盘一个块的坐标（桌面端写 SQLite，浏览器端写 localStorage）
 function persistBlockPosition(b) {
   api.moveTask(b.id, b.x, b.y);
 }
-/* relayout 重排后，所有已完成块的 y 都变了（堆叠位置被重新分配），
-   必须全部落盘，否则刷新后只有被拖的块坐标是对的，其他块回到旧位置导致顺序错乱 */
-function persistAllDonePositions() {
+/* relayout 重排后，所有堆叠区（已完成/待确认）块的 y 都变了，必须全部落盘 */
+function persistAllStackedPositions() {
   for (const b of blocks) {
-    if (b.done) persistBlockPosition(b);
+    if (b.stage === "done" || b.stage === "review") persistBlockPosition(b);
   }
 }
 
@@ -652,7 +725,7 @@ function alignPendingBlocks(appendIds) {
   // 退出放大后坐标就是错的（CSS 放大态下 b.x/b.y 是无效的，
   // 因为 position: fixed 用 left/top: 5% 覆盖，退出后应恢复到原位置）。
   const pending = blocks.filter(b => {
-    if (b.done) return false;
+    if (b.stage !== "todo") return false;
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     return el ? !el.classList.contains("zoomed") : true;
   });
@@ -677,7 +750,7 @@ function alignPendingBlocks(appendIds) {
     return el;
   });
   const startX = 20;
-  let cursorY = dividerY() + 16;
+  let cursorY = reviewY() + 16;
   const GAP = 12;
   pending.forEach((b, i) => {
     const el = els[i];
@@ -742,13 +815,13 @@ function scrollToBlocks(ids) {
 }
 
 function restorePendingBlocks() {
-  const els = blocks.filter(b => !b.done && savedPositions[b.id]).map(b => {
+  const els = blocks.filter(b => b.stage === "todo" && savedPositions[b.id]).map(b => {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (el) el.classList.add("align-anim");
     return el;
   });
   for (const b of blocks) {
-    if (b.done) continue;
+    if (b.stage !== "todo") continue;
     const sv = savedPositions[b.id];
     if (!sv) continue;
     b.x = sv.x; b.y = sv.y;
@@ -805,11 +878,12 @@ function renderFolders() {
     // Tauri: get_folders SQL 里已聚合 total/completed。
     // 浏览器: localStorage 的 folders 不随任务变动，直接从 d.tasks 现算，
     //         保证新建/删除/勾选任务后侧栏数量立即正确。
+    // 待完成 = stage='todo'（review 与 done 都视为「不在待完成区」）
     let pendingCount = (Number(f.total) || 0) - (Number(f.completed) || 0);
     if (!isTauri()) {
       const d = lsLoadAll();
       const fs = (d.tasks || []).filter(t => t.folder_id === f.id);
-      pendingCount = fs.filter(t => !t.is_completed).length;
+      pendingCount = fs.filter(t => normalizeStage(t.stage) === "todo").length;
     }
     if (pendingCount > 0) li.querySelector(".cnt").textContent = String(pendingCount);
     li.addEventListener("click", e => {
@@ -901,8 +975,9 @@ function updateFolderCount(folderId) {
 
   let pending;
   if (Number(folderId) === Number(activeFolderId)) {
-    // 当前夹：内存 blocks 是最新的（勾选/删除/合并/拖过分界线都已同步到 b.done）
-    pending = blocks.filter(b => !b.done).length;
+    // 当前夹：内存 blocks 是最新的（勾选/删除/合并/拖过分界线都已同步到 b.stage）
+    // 待完成 = stage !== 'done' && stage !== 'review'，即真正的 todo
+    pending = blocks.filter(b => b.stage !== "done" && b.stage !== "review").length;
   } else if (isTauri()) {
     // Tauri 桌面端：其他夹的实时计数从后端拉。
     // 之前的实现走 localStorage mirror，打包后 localStorage 里根本没有 glassCanvas.v1 数据，
@@ -1179,25 +1254,20 @@ async function handleCrossFolderDrop(targetFolderId, el, b) {
   if (destTitle !== srcContent) {
     await api.updateContent(moved.id, destTitle);
   }
-  // 目标夹是速记夹：便签夹没有「已完成」概念，任何进入速记夹的块重置为未完成
-  // 否则源夹遗留的 is_completed 会让速记夹列表多出无意义状态
-  // 目标夹是普通夹：保持源夹的完成状态（源夹已完成 → 目标夹也已完成）
+  // 目标夹是速记夹：便签夹没有 stage 概念，任何进入速记夹的块重置为 todo
+  // 目标夹是普通夹：moveTaskToFolder 通过 create_task_with_stage 保留了源夹的 stage
   if (dstIsSticky) {
-    if (moved.done) { await api.toggleTask(moved.id, false); }
-  } else if (srcIsSticky) {
-    // 速记夹 → 普通夹：速记夹内所有块都视为未完成，无需切换
-  } else if (moved.done !== b.done) {
-    // 普通夹 → 普通夹：moveTaskToFolder 创建的新任务默认 is_completed=false，
-    // 若源块是已完成状态，需要同步切换回已完成
-    if (b.done) { await api.toggleTask(moved.id, true); }
+    const s = normalizeStage(moved.stage);
+    if (s !== "todo") await api.setStage(moved.id, "todo");
   }
   // 从当前 blocks 里移除（当前夹的 DOM 元素也移除）
   blocks = blocks.filter(x => x.id !== b.id);
   if (el.parentElement) el.remove();
   // 就地同步 folders[] 的 total/completed：否则 updateFolderCount / renderFolders
   // 读的还是 SQLite 里的旧值，用户必须再点一次夹子才看到新数字。
-  const srcDecDone = srcIsSticky ? 0 : (b.done ? 1 : 0);
-  const dstIncDone = dstIsSticky ? 0 : (b.done ? 1 : 0);
+  // completed 语义：stage ∈ {'done','review'}（即非 todo 的块），与后端 get_folders 一致
+  const srcDecDone = srcIsSticky ? 0 : (normalizeStage(b.stage) === "todo" ? 0 : 1);
+  const dstIncDone = dstIsSticky ? 0 : (normalizeStage(moved.stage) === "todo" ? 0 : 1);
   const srcFolder = folders.find(f => Number(f.id) === Number(srcFolderId));
   if (srcFolder) {
     srcFolder.total = Math.max(0, (Number(srcFolder.total) || 0) - 1);
@@ -1371,18 +1441,18 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
-/* 已完成块按顺序堆叠：默认按创建时间从远到近排序（旧→新），
+/* 堆叠区（done / review）通用布局：默认按创建时间从远到近排序（旧→新），
    手动拖动后切到自由排序（按 y 位置）。
-   insertB 为「刚拖入完成区」的块：不靠 createdAt 插顶，而是按 drop 时的 y
-   相对已有块的位置决定插入索引，插到对应位置（顶/中/底） */
-function layoutDoneRows(insertB) {
+   insertB 为「刚拖入该区」的块：按 drop 时的 y 相对已有块的位置决定插入索引。
+   stage: 'done' | 'review'
+   originY: 该段的顶部起点 y（done 段 = 14；review 段 = doneY + 16 之类） */
+function layoutStackedRows(stage, originY, insertB) {
   const mode = getDoneSortMode();
-  const others = blocks.filter(b => b.done && b !== insertB).sort(
+  const others = blocks.filter(b => b.stage === stage && b !== insertB).sort(
     mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
   );
-  let insertIdx = others.length; // 默认插到最后（drop 在最下）
+  let insertIdx = others.length;
   if (insertB) {
-    // 用 drop 位置对比已有块的旧 y，找到第一个「中心点在 drop 之下」的位置
     const dropCenter = insertB.y;
     for (let i = 0; i < others.length; i++) {
       const el = board.querySelector(`.block[data-id="${others[i].id}"]`);
@@ -1391,7 +1461,7 @@ function layoutDoneRows(insertB) {
     }
     others.splice(insertIdx, 0, insertB);
   }
-  let cursor = 14;
+  let cursor = originY;
   for (const b of others) {
     b.x = 20; b.row = true;
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
@@ -1399,74 +1469,89 @@ function layoutDoneRows(insertB) {
     b.y = cursor;
     cursor += h + 10;
   }
-  return { doneList: others, total: cursor - 10 };
+  return { list: others, total: others.length ? cursor - originY - 10 : 0 };
 }
 
-/* 下一次 relayout 要把哪个块按 drop 位置插入已完成区（拖入完成区时设置，
-   relayout 消费后立即清空；其余场景保持 null，走 createdAt/manual 排序） */
-let pendingInsert = null;
+/* 兼容旧调用：只堆叠 done 段 */
+function layoutDoneRows(insertB) {
+  return layoutStackedRows("done", 14, insertB);
+}
 
-/* 就地重排：只改位置/类名，不重建 DOM（无闪烁、无 blockIn 重播） */
+/* 下一次 relayout 要把哪个块按 drop 位置插入对应堆叠区（拖入时设置，relayout 消费后立即清空） */
+let pendingInsert = null;      // done 段
+let pendingReviewInsert = null; // review 段
+
+/* 就地重排：只改位置/类名，不重建 DOM（无闪烁、无 blockIn 重播）。
+   三段布局：
+     · done 段：从 y=14 开始向下堆叠 → doneY = max(defaultDoneY, 14 + doneTotal + 46)
+     · review 段：从 doneY + 16 开始向下堆叠 → reviewY = max(defaultReviewY, doneY + reviewTotal + 46)
+     · todo 段：其余待完成块在 reviewY 下方自由摆放
+   分界线 = max(默认值, 需要高度)：
+     · 默认值下限保证即使内容为空，也留下一个拖入目标区
+     · need 随内容增长：内容多时分界线下移让位，内容始终精确容纳、不溢出 */
 function relayout(initial) {
-  // 先设置类，确保按最终形态（.done/.row）算出真实高度
+  // 先设置类，确保按最终形态（.done / .review / .row）算出真实高度
   for (const b of blocks) {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el) continue;
-    el.classList.toggle("done", b.done);
+    el.classList.toggle("done", b.stage === "done");
+    el.classList.toggle("review", b.stage === "review");
     el.classList.toggle("row", b.row);
   }
-  // insertB 是「本次刚拖入已完成区」的块，用于按 drop 位置决定插入索引；
-  // 其余场景（加载、勾选、拖回待完成）为 null，走 createdAt / manual 排序
   const insertB = pendingInsert ? blocks.find(x => x.id === pendingInsert) : null;
-  const { doneList, total } = layoutDoneRows(insertB);
-  pendingInsert = null; // 一次性：本次插入消费后即清空，避免影响后续 relayout
-  const need = doneList.length ? 14 + total + 46 : 0;
-  const defY = defaultDividerY();
+  const reviewInsertB = pendingReviewInsert ? blocks.find(x => x.id === pendingReviewInsert) : null;
+  pendingInsert = null;
+  pendingReviewInsert = null;
+
+  const doneRes = layoutStackedRows("done", 14, insertB);
+  const defDy = defaultDoneY();
+  const dy = doneRes.list.length ? Math.max(defDy, 14 + doneRes.total + 46) : defDy;
+
+  const reviewRes = layoutStackedRows("review", dy + 16, reviewInsertB);
+  const defRy = defaultReviewY();
+  const ry = reviewRes.list.length
+    ? Math.max(dy + MIN_REVIEW_H, dy + 16 + reviewRes.total + 46)
+    : Math.max(defRy, dy + MIN_REVIEW_H);
+
   const f = folders.find(x => x.id === activeFolderId);
-  // 分界线 = max(defY, need)：
-  //   · defY 下限（30%）—— 已完成内容少时也保证有一个够大的拖入目标区，
-  //     不再因为内容少而把分界线顶到贴顶、导致「必须拖到很上边才能归入已完成」
-  //   · need 随内容增长 —— 内容多时分界线下移让位，内容始终精确容纳、不溢出
-  //   · 不再用「已存 dividerY」作下限：旧值会在内容收缩后把分界线顶住、
-  //     已完成区变小了分界线却纹丝不动，中间留一块空白
-  const dy = Math.max(defY, need);
-  if (f) { f.dividerY = dy; setDividerY(activeFolderId, dy); }
+  if (f) {
+    f.dividerY = dy;
+    f.reviewY = ry;
+    setDividerY(activeFolderId, dy, ry);
+  }
   paintDivider();
 
-  // 越界清理：分界线随已完成内容下移后，原先紧贴分界线下方摆放的待完成块会
-  // 被「顶」进已完成区、被堆叠的已完成内容压住（如 E12 拖入后淹没了「123」）。
-  // 这里把上沿仍在分界线之上的待完成块逐个推回分界线下方的空位并立即落盘；
-  // 下移会腾出空位，后续越界块再落进来，链式补位直到无重叠。
-  // 刚新建的块（__justCreated）跳过：其 y 由创建入口设为分界线下方（如 dy+34），
-  // 若本轮完成区高度变化把 dy 顶到它之上，findFreeSpot(fromTop) 会把它抢跑到
-  // 分界线正下方第一行，视觉上就是「刚输入的新任务被顶上去、不再留在最底部」。
-  // 该标记在创建时写入一次后不清除；因为创建入口始终把 y 放在 dy 附近，
-  // 后续 relayout 只会跳过它而不改变其坐标（除非用户拖拽/对齐，那些操作
-  // 本身就会重写 b.y，标志位随之失效）。无需消费即清空。
+  // 越界清理：分界线随内容下移后，原先紧贴 reviewY 下方摆放的待完成块会
+  // 被「顶」进 review/done 区、被堆叠内容压住。
+  // 这里把上沿仍在 reviewY 之上的待完成块逐个推回 reviewY 下方的空位并立即落盘。
   for (const b of blocks) {
-    if (b.done) continue;
+    if (b.stage !== "todo") continue;
     if (b.__justCreated) continue;
     const el3 = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el3) continue;
-    if (b.y < dy) {
-      findFreeSpot(b, dy, true);
+    if (b.y < ry) {
+      findFreeSpot(b, ry, true);
       persistBlockPosition(b);
     }
   }
 
-  const todo = blocks.filter(b => !b.done).length;
-  const done = blocks.length - todo;
+  const todo = blocks.filter(b => b.stage === "todo").length;
+  const review = blocks.filter(b => b.stage === "review").length;
+  const done = blocks.filter(b => b.stage === "done").length;
   boardEmpty.hidden = blocks.length > 0;
   const doneHint = $("done-hint");
-  if (doneHint) doneHint.hidden = !(blocks.length > 0 && done === 0);
+  if (doneHint) doneHint.hidden = !(blocks.length > 0 && done === 0 && review === 0);
   const pLabel = $("pending-label");
   if (pLabel) pLabel.innerHTML = `待完成 <b>${todo}</b>`;
   const topLabel = divider.querySelector(".label.top");
   if (topLabel) topLabel.textContent = done ? `已完成 ${done}` : "已完成";
+  const rLabelTop = reviewDivider && reviewDivider.querySelector(".label.top");
+  if (rLabelTop) rLabelTop.textContent = review ? `待确认 ${review}` : "待确认";
+  const rLabelBottom = reviewDivider && reviewDivider.querySelector(".label.bottom");
+  if (rLabelBottom) rLabelBottom.innerHTML = `待完成 <b>${todo}</b>`;
 
-  // 画布高度：待完成块也纳入计算（否则滚到分界线下方 200px 就触底），
-  // 再额外留 CANVAS_BOTTOM_PAD 的空白区，让页面可以持续向下滚
-  let maxY = dy + CANVAS_BOTTOM_PAD;
+  // 画布高度：待完成块也纳入计算（否则滚到 reviewY 下方 200px 就触底）
+  let maxY = ry + CANVAS_BOTTOM_PAD;
   for (const b of blocks) {
     const el2 = board.querySelector(`.block[data-id="${b.id}"]`);
     maxY = Math.max(maxY, b.y + (el2 ? el2.offsetHeight : 44) + 40);
@@ -1477,14 +1562,18 @@ function relayout(initial) {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el) continue;
     const check = el.querySelector(".block-check");
-    if (check) check.textContent = b.done ? "✓" : "";
+    if (check) {
+      if (b.stage === "done") check.textContent = "✓";
+      else if (b.stage === "review") check.textContent = "?";
+      else check.textContent = "";
+    }
     encodePos(el, b);
   }
-  // 已完成块整体置于画布最底层
-  doneList.forEach(b => {
+  // 堆叠区块整体置于画布最底层
+  for (const b of doneRes.list.concat(reviewRes.list)) {
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (el) board.appendChild(el);
-  });
+  }
 }
 
 /* 两个矩形是否重叠（块的 y 已在调用处 clamp 到分界线下方） */
@@ -1499,14 +1588,14 @@ function rectsOverlap(x1, y1, w1, h1, x2, y2, w2, h2) {
 function findFreeSpot(b, dy, fromTop) {
   const top = dy + 16;
   for (const o of blocks) {
-    if (o.id === b.id || o.done) continue;
+    if (o.id === b.id || o.stage !== "todo") continue;
     const el = board.querySelector(`.block[data-id="${o.id}"]`);
     if (el) { o.w = el.offsetWidth; o.h = el.offsetHeight; }
   }
   const selfEl = board.querySelector(`.block[data-id="${b.id}"]`);
   if (selfEl) {
     const cls = selfEl.classList;
-    cls.remove("done", "row");
+    cls.remove("done", "review", "row");
     b.w = selfEl.offsetWidth; b.h = selfEl.offsetHeight;
   }
   const w = Math.max(180, b.w || 200), h = Math.max(40, b.h || 48);
@@ -1519,7 +1608,7 @@ function findFreeSpot(b, dy, fromTop) {
     while (curX <= maxX) {
       let rowBottom = 0;
       for (const o of blocks) {
-        if (o.id === b.id || o.done) continue;
+        if (o.id === b.id || o.stage !== "todo") continue;
         const oy = Math.max(top, o.y || 0);
         const ow = Math.max(180, o.w || 200), oh = Math.max(40, o.h || 48);
         if (rectsOverlap(curX, y, w, h, o.x, oy, ow, oh)) {
@@ -1542,7 +1631,8 @@ function findFreeSpot(b, dy, fromTop) {
 /* ---------- 生成任务块 ---------- */
 function makeBlock(b) {
   const el = document.createElement("div");
-  el.className = "block" + (b.done ? " done" : "") + (b.row ? " row" : "");
+  const stageCls = b.stage === "done" ? " done" : (b.stage === "review" ? " review" : "");
+  el.className = "block" + stageCls + (b.row ? " row" : "");
   el.style.top = b.y + "px";
   if (!b.row) el.style.left = b.x + "px";
   el.dataset.id = b.id;
@@ -1571,8 +1661,10 @@ function makeBlock(b) {
 
   const check = document.createElement("button");
   check.className = "block-check";
-  check.textContent = b.done ? "✓" : "";
-  check.title = b.done ? "标记为未完成" : "标记为完成";
+  const stage = b.stage || "todo";
+  check.textContent = stage === "done" ? "✓" : (stage === "review" ? "?" : "");
+  const nextStageHint = stage === "todo" ? "待确认" : stage === "review" ? "已完成" : "待完成";
+  check.title = "点击标记为「" + nextStageHint + "」";
   check.addEventListener("click", e => { e.stopPropagation(); toggleDone(b.id); });
 
   const del = document.createElement("button");
@@ -1903,12 +1995,12 @@ canvas.addEventListener("dblclick", e => {
   const rect = board.getBoundingClientRect();
   const clickX = e.clientX - rect.left;
   const clickY = e.clientY - rect.top;
-  const dy = dividerY();
+  const ry = reviewY();
   // 靠左对齐模式下，双击位置不再决定落点（新块统一追加到栈底）；
-  // 但 API 需要一个合法 y，随便给一个远高 dy 的值，随后 alignPendingBlocks
+  // 但 API 需要一个合法 y，随便给一个远高 ry 的值，随后 alignPendingBlocks
   // 会把它排到最下边行——不影响最终视觉位置。
   const x = Math.max(16, Math.round(clickX));
-  const y = clickY > dy + 24 ? Math.round(clickY) : Math.round(dy + 34);
+  const y = clickY > ry + 24 ? Math.round(clickY) : Math.round(ry + 34);
   api.createTask(activeFolderId, "", x, y).then(nb => {
     nb.title = ""; // 新建时先显示空内容，直接编辑
     nb.__justCreated = true; // 标记：本轮 relayout 保护其初始 y，避免被 findFreeSpot 顶到分界线正下方
@@ -1943,11 +2035,11 @@ async function createTasksFromPaste(text, clientX, clientY) {
   const lines = text.split(/\r?\n/).map(s => s.replace(/\s+$/,"")).filter(s => s.trim().length > 0);
   if (!lines.length) return;
   const rect = board.getBoundingClientRect();
-  const dy = dividerY();
+  const ry = reviewY();
   const px = Math.max(16, Math.round(clientX - rect.left));
-  // 若粘贴点在已完成区上方，强制落到待完成区顶端附近，避免覆盖已完成内容
+  // 粘贴只创建待完成块，若粘贴点在待完成区上方，强制落到待完成区顶端附近
   let py = Math.round(clientY - rect.top);
-  if (py < dy + 24) py = dy + 24;
+  if (py < ry + 24) py = ry + 24;
   const GAP = 62; // 估算每行块高度 + 间距
   const created = [];
   for (let i = 0; i < lines.length; i++) {
@@ -1984,7 +2076,7 @@ function startDrag(e, el, b) {
   let raf = null, latestEv = null;
   let curX = b.x, curY = b.y;
   let startLeft = b.x, startTop = b.y;
-  let elH = 0, boardRect = null, dY = dividerY();
+  let elH = 0, boardRect = null, dY = dividerY(), rY = reviewY();
   let xLines = [], yLines = [];
   let lastGuideV = null, lastGuideH = null;
   /* 跨任务夹移动：记录本轮拖动中最后一次悬停在侧栏任务夹上的 li。
@@ -1999,7 +2091,8 @@ function startDrag(e, el, b) {
     elH = el.offsetHeight;
     boardRect = board.getBoundingClientRect();
     xLines = [16];
-    yLines = [dY, dY - elH];
+    // 两条分界线的磁吸位：done/review 段顶
+    yLines = [dY, dY - elH, rY, rY - elH];
     [...board.querySelectorAll(".block")].forEach(o => {
       if (o === el) return;
       const ox = parseFloat(o.style.left) || 0;
@@ -2099,43 +2192,47 @@ function startDrag(e, el, b) {
     if (!moved) return;
     // 就地更新，不复建整块画布，避免释放时闪烁
     b.x = Math.round(curX); b.y = Math.round(curY);
-    // 判定口径：块的「上沿」一跨过分界线就算已完成——向上拖时上沿最先越线，
-    // 相当于「任意一点内容越过分界线即归入已完成」，不需要整块越过、也不需要
-    // 拖到中心线以上（那是旧逻辑，导致必须拖到很上边才算数）
-    const shouldDone = b.y < dividerY();
-    if (shouldDone !== b.done) {
-      b.done = shouldDone; b.row = shouldDone;
-      // 拖入已完成区：记录本块，relayout 按 drop 位置决定插入索引（不再一律插顶）
-      if (shouldDone) pendingInsert = b.id;
-      api.toggleTask(b.id, shouldDone);
-      // 完成区由 relayout 重新堆叠；放回待完成区则用 findFreeSpot 找不重叠的位置
-      if (!shouldDone) findFreeSpot(b, dividerY());
+    // 三段判定（按块上沿的 y）：
+    //   b.y < dY  → done（越过分界线一即归入已完成）
+    //   b.y < rY  → review（位于两分界线之间）
+    //   otherwise → todo
+    const dyNow = dividerY(), ryNow = reviewY();
+    let newStage;
+    if (b.y < dyNow) newStage = "done";
+    else if (b.y < ryNow) newStage = "review";
+    else newStage = "todo";
+    const oldStage = normalizeStage(b.stage);
+    if (newStage !== oldStage) {
+      b.stage = newStage;
+      b.done = newStage === "done";
+      b.row = (newStage === "done" || newStage === "review");
+      // 拖入堆叠区：记录本块，relayout 按 drop 位置决定插入索引
+      pendingInsert = (newStage === "done") ? b.id : null;
+      pendingReviewInsert = (newStage === "review") ? b.id : null;
+      api.setStage(b.id, newStage);
+      // 退回待完成区时用 findFreeSpot 找不重叠的位置（起点为 reviewY）
+      if (newStage === "todo") findFreeSpot(b, ryNow);
       relayout(false);
-      // 所有已完成块的堆叠位置都变了，必须全部落盘
-      persistAllDonePositions();
-      // 拖回待完成区的块自身坐标也要落盘
-      if (!shouldDone) persistBlockPosition(b);
+      persistAllStackedPositions();
+      if (newStage === "todo") persistBlockPosition(b);
       mirrorNow();
-      // 同步刷新侧栏当前夹的「待完成数量」badge
       updateFolderCount(activeFolderId);
-      // 处于「靠左对齐」模式下，任何跨区拖动后都强制重排：
-      //   · 从 done 拖回 pending（!shouldDone）：本块是新加入的，追加到最下边行
-      //   · 从 pending 拖到 done：本块离开，其他块保持原顺序重排
+      // 对齐模式下：从堆叠区拖回待完成区时，本块是新加入的，追加到最下边行
+      const returnedToTodo = (oldStage !== "todo" && newStage === "todo");
       if (alignMode && !isStickyFolderActive()) {
-        alignPendingBlocks(!shouldDone ? [b.id] : []);
+        alignPendingBlocks(returnedToTodo ? [b.id] : []);
       }
     } else {
       // 状态没变：在当前区域内移动
-      if (b.done) {
-        // 已完成区域内拖动 → 切到自由排序，按拖动位置重排并落盘
+      if (oldStage === "done" || oldStage === "review") {
+        // 堆叠区内拖动 → 切到自由排序，按拖动位置重排并落盘
         setDoneSortMode("manual");
         relayout(false);
-        persistAllDonePositions();
+        persistAllStackedPositions();
       } else {
-        // 待完成区域内拖动 → 只更新坐标
+        // 待完成区内拖动 → 只更新坐标
         api.moveTask(b.id, b.x, b.y);
         encodePos(el, b);
-        // 重叠合并检测：拖到其他块上方时合并内容
         checkAndMerge(b, el);
         // 对齐模式下：pending 块被拖动会打乱堆栈，立即按 y 升序重排回堆栈
         if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
@@ -2250,36 +2347,52 @@ async function copySelectedBlock() {
   toast("已复制任务内容");
   return true;
 }
+/* 阶段循环：todo → review → done → todo。点击 checkbox 推进一个阶段。
+   进入 done / review 段时按堆叠区放置；退回 todo 时用 findFreeSpot 找空位。 */
 function toggleDone(id) {
   const b = blocks.find(x => x.id === id);
   if (!b) return;
-  const dy = dividerY();
-  if (!b.done) {
-    b.done = true; b.row = true; b.x = 20;
-    // 自由排序模式下，新完成的块放在底部（给一个很大的 y，排序时自然垫底）
+  const cur = normalizeStage(b.stage);
+  let next;
+  if (cur === "todo") next = "review";
+  else if (cur === "review") next = "done";
+  else next = "todo";
+
+  if (next === "done" || next === "review") {
+    // 从 todo/review 推进：进入堆叠区
+    if (next === "done") b.row = true;
+    if (next === "review") b.row = true;
+    b.x = 20;
+    // 自由排序模式下，新进入的块垫底
     if (getDoneSortMode() === "manual") b.y = 999999;
-    api.toggleTask(id, true);
+    b.stage = next;
+    b.done = next === "done";
+    pendingInsert = (next === "done") ? b.id : null;
+    pendingReviewInsert = (next === "review") ? b.id : null;
+    api.setStage(id, next);
   } else {
-    b.done = false; b.row = false;
-    // 摆放前先把分界线算对：此刻 dividerY() 还包含本块的已完成高度（本块原先
-    // 堆在已完成区底部，把分界线顶得很低），直接用它找空位会把块扔到很远下方、
-    // 待完成区顶部留下一片空白。先按「本块已离开」的已完成内容算分界线再摆放。
-    // b.done 刚置 false，layoutDoneRows 会自动排除本块，无需额外标记
-    let newDy = defaultDividerY();
-    const rows2 = layoutDoneRows(null);
-    if (rows2.total) newDy = Math.max(defaultDividerY(), 14 + rows2.total + 46);
-    findFreeSpot(b, newDy, true);
-    api.toggleTask(id, false);
+    // done/review → todo：退回自由摆放区
+    b.stage = "todo";
+    b.done = false;
+    b.row = false;
+    // 摆放前先按「本块已离开堆叠区」的高度算 reviewY，避免被顶得太远
+    let newRy = defaultReviewY();
+    const rows2 = layoutStackedRows("done", 14, null);
+    let dy2 = defaultDoneY();
+    if (rows2.total) dy2 = Math.max(defaultDoneY(), 14 + rows2.total + 46);
+    const revRows = layoutStackedRows("review", dy2 + 16, null);
+    if (revRows.total) newRy = Math.max(dy2 + MIN_REVIEW_H, dy2 + 16 + revRows.total + 46);
+    findFreeSpot(b, newRy, true);
+    api.setStage(id, "todo");
     api.moveTask(id, b.x, b.y);
   }
   relayout(false);
-  persistAllDonePositions();
+  persistAllStackedPositions();
   mirrorNow();
-  // 勾选后如果处于「靠左对齐」模式，把待完成区重新堆栈：
-  //   · 从已完成勾回待完成（!b.done）——本块重新加入 pending，追加到最下边行
-  //   · 从待完成勾到已完成（b.done）——本块离开，其他 pending 块保持原顺序重排
+  // 对齐模式下：本块刚退回 todo，追加到 pending 队尾
+  const returnedToTodo = (cur !== "todo" && next === "todo");
   if (alignMode && !isStickyFolderActive()) {
-    alignPendingBlocks(!b.done ? [b.id] : []);
+    alignPendingBlocks(returnedToTodo ? [b.id] : []);
   }
   // 同步刷新侧栏当前夹的「待完成数量」badge
   updateFolderCount(activeFolderId);
@@ -2339,7 +2452,7 @@ function mirrorNow() {
         folders: folders.map(f => ({ id: f.id, name: f.name })),
         blocks: blocks.map(b => ({
           id: b.id, folderId: b.folderId, title: b.title,
-          done: b.done, createdAt: b.createdAt, x: b.x, y: b.y,
+          stage: b.stage, done: b.done, createdAt: b.createdAt, x: b.x, y: b.y,
         })),
         t: Date.now(),
       };
@@ -2359,7 +2472,8 @@ async function restoreFromMirror() {
     for (const b of snap.blocks) {
       if (b.folderId !== activeFolderId) continue;
       const nb = await api.createTask(b.folderId, b.title || "", b.x || 16, b.y || 100);
-      if (b.done) { await api.toggleTask(nb.id, true); nb.done = true; nb.row = true; }
+      const s = normalizeStage(b.stage);
+      if (s !== "todo") { await api.setStage(nb.id, s); nb.stage = s; nb.done = s === "done"; nb.row = true; }
       else await api.moveTask(nb.id, nb.x, nb.y);
       blocks.push(nb);
     }
@@ -2590,7 +2704,8 @@ $("import-file").addEventListener("change", async e => {
         const oldBlocks = f.blocks || [];
         for (const b of oldBlocks) {
           const nb = await api.createTask(nf.id, b.title || "", b.x || 16, b.y || 100);
-          if (b.done) { await api.toggleTask(nb.id, true); nb.done = true; nb.row = true; }
+          const s = normalizeStage(b.stage);
+          if (s !== "todo") { await api.setStage(nb.id, s); nb.stage = s; nb.done = s === "done"; nb.row = true; }
           blocks.push(nb);
         }
         folders.push({ ...nf, dividerY: getDividerY(nf.id) });
@@ -2748,10 +2863,10 @@ async function reloadTasks() {
   const isSticky = isStickyFolderActive();
   const allZero = blocks.length > 0 && blocks.every(b => b.x === 0 && b.y === 0);
   if (allZero && !isSticky) {
-    const dy = dividerY();
+    const ry = reviewY();
     const jobs = blocks.map((b, i) => {
       b.x = 20 + (i % 4) * 200;
-      b.y = dy + 20 + Math.floor(i / 4) * 80;
+      b.y = ry + 20 + Math.floor(i / 4) * 80;
       return api.moveTask(b.id, b.x, b.y);
     });
     await Promise.all(jobs);

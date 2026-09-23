@@ -490,22 +490,13 @@ function selectItem(id, additive) {
 }
 /* ---------- 组合按钮显隐：只有选中 ≥2 张时启用 ---------- */
 function syncCombineBtn() {
-  if (!imageCombineBtn) return;
-  imageCombineBtn.hidden = selection.size < 2;
-  if (selection.size >= 2) {
-    imageCombineBtn.title = `组合 ${selection.size} 张选中图片（Ctrl+M）`;
-  }
+  // 组合功能已下线（UI 隐藏，代码保留），不再同步显示
+  return;
 }
 /* ---------- 取消组合按钮显隐：只有恰好选中一张「有快照的组合图」时启用 ---------- */
 function syncUncombineBtn() {
-  if (!imageUncombineBtn) return;
-  const t = getSelectedComboItem();
-  imageUncombineBtn.hidden = !t;
-  if (t) {
-    imageUncombineBtn.title = `拆分这张组合图（恢复 ${t.snap.sources.length} 张原图，Ctrl+Z）`;
-  } else {
-    imageUncombineBtn.title = "选中一张组合图片后可拆分（Ctrl+Z）";
-  }
+  // 组合功能已下线（UI 隐藏，代码保留），不再同步显示
+  return;
 }
 /* 一次调用同步两个按钮的显隐，任何 selection 变化后都调用它，避免遗漏。 */
 function syncImageToolbarBtns() {
@@ -551,13 +542,13 @@ function getCommonGroupOfSelection() {
 function syncAlignBtns() {
   const btns = [imageAlignLeftBtn, imageAlignRightBtn, imageAlignTopBtn,
                 imageAlignBottomBtn, imageAlignCenterHBtn, imageAlignCenterVBtn];
-  // 对齐只对「组内多选」开放：selection ≥2 且全部属于同一个 group
-  const gid = getCommonGroupOfSelection();
-  const enabled = !!(gid && selection.size >= 2);
+  // 对齐只需要 selection ≥2 张，不要求属于同一组：
+  // 用户可以选中若干散落图 → 直接对齐，不必先分组。
+  const enabled = selection.size >= 2;
   for (const b of btns) {
     if (!b) continue;
     b.hidden = !enabled;
-    if (enabled) b.title = b.title.replace(/（.*?）/, `（组内 ${selection.size} 张选中）`);
+    if (enabled) b.title = b.dataset.baseTitle || (b.dataset.baseTitle = b.title.replace(/（.*?）/,''));
   }
 }
 
@@ -597,10 +588,8 @@ function ungroupSelected() {
  *              上 = 所有选中图的最上 y 一致；下 = 下边缘一致；
  *              水平居中 = 中心 x 一致；垂直居中 = 中心 y 一致。 */
 function applyAlignment(which) {
-  const gid = getCommonGroupOfSelection();
-  if (!gid) { toast("对齐只能在同一个组内进行", 2500); return; }
   const sel = items.filter(it => selection.has(it.id));
-  if (sel.length < 2) return;
+  if (sel.length < 2) { toast("请至少选中 2 张图片再对齐", 2500); return; }
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   let centerSumX = 0, centerSumY = 0;
   for (const it of sel) {
@@ -1550,19 +1539,19 @@ function bindKeyboard() {
     if (!imagePane || imagePane.hidden) return;
     if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
     if (_renaming) return;
-    // Ctrl+M / Cmd+M：组合选中的 2+ 张图
+    // Ctrl+M / Cmd+M：组合功能已下线（UI 隐藏），快捷键也不再触发
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
         (e.key === "m" || e.key === "M")) {
       e.preventDefault();
-      combineSelected();
+      toast("组合功能已下线", 2000);
       return;
     }
-    // Ctrl+Z / Cmd+Z：拆分当前选中的那张组合图（没选中或选中的非组合图则不拦截）
+    // Ctrl+Z / Cmd+Z：拆分功能已下线（UI 隐藏），快捷键也不再触发
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
         (e.key === "z" || e.key === "Z")) {
       if (getSelectedComboItem()) {
         e.preventDefault();
-        uncombineSelected();
+        toast("拆分功能已下线", 2000);
         return;
       }
     }

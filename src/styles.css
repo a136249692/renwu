@@ -369,6 +369,18 @@ body.is-dragging .bg::after { opacity: 0; }
    避免继承到勾选按钮（opacity 会向下相乘，导致按钮被压暗） */
 .block.done .block-title { color: var(--muted); }
 .block.done .block-meta { color: rgba(29,29,31,0.40); }
+/* 待确认的块：黄色系警示色调，与已完成区分开但视觉略收敛 */
+.block.review .block-title { color: rgba(29,29,31,0.72); }
+.block.review .block-meta { color: rgba(29,29,31,0.50); }
+.block.review {
+  background: rgba(255, 249, 220, 0.92);
+  border-color: rgba(240, 185, 58, 0.32);
+  box-shadow: 0 1px 3px rgba(240,185,58,0.08), 0 4px 12px rgba(240,185,58,0.06), inset 0 1px 0 rgba(255,255,255,0.95);
+}
+.block.review:hover {
+  background: rgba(255, 249, 220, 1);
+  border-color: rgba(240, 185, 58, 0.45);
+}
 .block.row {
   left: 20px !important; right: 20px; max-width: none; min-width: 0;
   width: auto; display: flex; align-items: center; gap: 12px;
@@ -530,6 +542,11 @@ body.zoom-active::after {
 .block.done .block-check {
   opacity: 1; background: var(--accent); border-color: transparent;
   box-shadow: 0 2px 8px rgba(0, 113, 227, 0.38);
+}
+/* 待确认 checkbox：黄底 + "?" 号，与已完成的蓝色形成三态视觉 */
+.block.review .block-check {
+  opacity: 1; background: #f0b93a; border-color: transparent;
+  box-shadow: 0 2px 8px rgba(240, 185, 58, 0.42);
 }
 /* 设置开启：所有卡片操作按钮常驻显示（覆盖上面三条 opacity:0 / hover 规则） */
 body.show-card-actions .block-check { opacity: 1; }

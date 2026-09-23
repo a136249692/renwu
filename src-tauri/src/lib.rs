@@ -28,9 +28,11 @@ pub fn run() {
             delete_folder,
             get_tasks,
             create_task,
+            create_task_with_stage,
             update_task_content,
             update_task_position,
             toggle_task,
+            set_stage,
             reorder_tasks,
             delete_task,
             storage_info,
@@ -152,6 +154,26 @@ fn create_task(
 }
 
 #[tauri::command]
+fn create_task_with_stage(
+    state: DbState,
+    folder_id: i64,
+    content: String,
+    position_x: Option<f64>,
+    position_y: Option<f64>,
+    stage: String,
+) -> Result<db::Task, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::create_task_with_stage(
+        &conn,
+        folder_id,
+        &content,
+        position_x.unwrap_or(0.0),
+        position_y.unwrap_or(0.0),
+        &stage,
+    )
+}
+
+#[tauri::command]
 fn update_task_position(state: DbState, id: i64, x: f64, y: f64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::update_task_position(&conn, id, x, y)
@@ -167,6 +189,12 @@ fn update_task_content(state: DbState, id: i64, content: String) -> Result<(), S
 fn toggle_task(state: DbState, id: i64, is_completed: bool) -> Result<db::Task, String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::toggle_task(&conn, id, is_completed)
+}
+
+#[tauri::command]
+fn set_stage(state: DbState, id: i64, stage: String) -> Result<db::Task, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::set_stage(&conn, id, &stage)
 }
 
 #[tauri::command]

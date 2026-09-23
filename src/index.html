@@ -56,7 +56,7 @@
                 <input type="checkbox" id="align-toggle" />
                 <span>靠左对齐</span>
               </label>
-              <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>Ctrl+V</kbd> 直接粘贴 · <kbd>拖动</kbd> 摆放 · 拖到分界线上方即完成</span>
+              <span class="hint"><kbd>双击空白</kbd> 新建 · <kbd>Ctrl+V</kbd> 直接粘贴 · <kbd>拖动</kbd> 摆放 · 上分线上方=已完成，中间=待确认</span>
             </div>
             <div class="sticky-header" id="sticky-header" hidden>
               <h2 id="folder-title-sticky">速记夹</h2>
@@ -79,15 +79,19 @@
             <div class="board" id="board">
               <div class="board-divider" id="divider">
                 <span class="label top" id="done-label">已完成</span>
+                <span class="label bottom" id="review-label">待确认</span>
+              </div>
+              <div class="board-divider" id="review-divider">
+                <span class="label top" id="review-label-top">待确认</span>
                 <span class="label bottom" id="pending-label">待完成</span>
               </div>
               <div class="guide v" id="guide-v" hidden></div>
               <div class="guide h" id="guide-h" hidden></div>
-              <div class="done-hint" id="done-hint" hidden>把块拖到分界线上方即为完成</div>
+              <div class="done-hint" id="done-hint" hidden>把块拖到上方分界线即为完成，中间为待确认</div>
               <div class="board-empty" id="board-empty">
                 <b>双击空白处</b> 即可输入任务<br />
                 输入完成后，把块拖到任意位置摆放<br />
-                拖到分界线上方即为「已完成」，下方为「待完成」
+                拖到最上分界线上方即为「已完成」，中间为「待确认」，下方为「待完成」
               </div>
             </div>
           </div>
@@ -129,18 +133,18 @@
             </div>
             <div class="mind-toolbar" id="image-toolbar" hidden>
               <button id="image-add" title="上传图片">＋ 上传</button>
-              <button id="image-combine" title="组合选中图片（Ctrl+M）：合成一张新 PNG" hidden>⧉ 组合</button>
-              <button id="image-uncombine" title="选中一张组合图片后可拆分（Ctrl+Z）" hidden>↩ 拆分</button>
+              <button id="image-combine" title="组合选中图片（Ctrl+M）：合成一张新 PNG" hidden style="display:none">⧉ 组合</button>
+              <button id="image-uncombine" title="选中一张组合图片后可拆分（Ctrl+Z）" hidden style="display:none">↩ 拆分</button>
               <span class="tb-sep" aria-hidden="true"></span>
-              <button id="image-group" title="把选中图片编为一组（Ctrl+Shift+G）" hidden>🗂 分组</button>
-              <button id="image-ungroup" title="解散整个组（Ctrl+Shift+U）" hidden>✕ 解散</button>
+              <button id="image-group" title="把选中图片编为一组（Ctrl+Shift+G）" hidden>📎 分组</button>
+              <button id="image-ungroup" title="解散整个组（Ctrl+Shift+U）" hidden>✂️ 解散</button>
               <span class="tb-sep" aria-hidden="true"></span>
-              <button id="align-left"  title="左对齐（组内选中的图）" hidden>⇤</button>
-              <button id="align-right" title="右对齐（组内选中的图）" hidden>⇥</button>
-              <button id="align-top"   title="上对齐（组内选中的图）" hidden>⤒</button>
-              <button id="align-bottom" title="下对齐（组内选中的图）" hidden>⤓</button>
-              <button id="align-center-h" title="水平居中（组内选中的图）" hidden>⫷⫸</button>
-              <button id="align-center-v" title="垂直居中（组内选中的图）" hidden>⫶⫷</button>
+              <button id="align-left"  title="左对齐（选中的图）" hidden>⏮️</button>
+              <button id="align-right" title="右对齐（选中的图）" hidden>⏭️</button>
+              <button id="align-top"   title="上对齐（选中的图）" hidden>⏫</button>
+              <button id="align-bottom" title="下对齐（选中的图）" hidden>⏬</button>
+              <button id="align-center-h" title="水平居中（选中的图）" hidden>↔️</button>
+              <button id="align-center-v" title="垂直居中（选中的图）" hidden>↕️</button>
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="image-zoom-out" title="缩小">−</button>
               <span id="image-zoom-label">100%</span>

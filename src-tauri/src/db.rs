@@ -22,11 +22,26 @@ pub struct Task {
     pub folder_id: i64,
     pub content: String,
     pub is_completed: bool,
+    pub stage: String,
     pub created_at: i64,
     pub sort_order: i64,
     pub x: f64,
     pub y: f64,
     pub calendar_date: Option<String>,
+}
+
+/// 任务阶段：'todo'（待完成）/ 'review'（待确认）/ 'done'（已完成）
+pub const STAGE_TODO: &str = "todo";
+pub const STAGE_REVIEW: &str = "review";
+pub const STAGE_DONE: &str = "done";
+
+/// 把 stage 字符串规范到三态之一；未知值回退到 'todo'。
+fn normalize_stage(s: Option<&str>) -> &'static str {
+    match s {
+        Some("review") => STAGE_REVIEW,
+        Some("done") => STAGE_DONE,
+        _ => STAGE_TODO,
+    }
 }
 
 #[derive(Serialize)]
@@ -115,6 +130,7 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             folder_id INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
             content TEXT NOT NULL,
             is_completed INTEGER NOT NULL DEFAULT 0,
+            stage TEXT NOT NULL DEFAULT 'todo',
             created_at INTEGER NOT NULL,
             sort_order INTEGER DEFAULT 0,
             updated_at INTEGER,
@@ -202,6 +218,23 @@ fn migrate(conn: &Connection) {
         )
         .expect("Failed to migrate tasks (calendar_date)");
     }
+    // stage 三态列：'todo' / 'review' / 'done'。旧数据默认 'todo'。
+    let has_stage = conn
+        .prepare("SELECT stage FROM tasks LIMIT 0")
+        .map(|_| true)
+        .unwrap_or(false);
+    if !has_stage {
+        conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN stage TEXT NOT NULL DEFAULT 'todo';",
+        )
+        .expect("Failed to migrate tasks (stage)");
+        // 旧数据里 is_completed=1 的任务回退成 'done'，保持既有语义一致
+        conn.execute(
+            "UPDATE tasks SET stage = 'done' WHERE is_completed = 1 AND stage = 'todo'",
+            [],
+        )
+        .ok();
+    }
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS task_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,7 +255,7 @@ pub fn list_folders(conn: &Connection) -> Result<Vec<Folder>, String> {
         .prepare(
             "SELECT f.id, f.name, f.created_at,
                     (SELECT COUNT(*) FROM tasks t WHERE t.folder_id = f.id) AS total,
-                    (SELECT COUNT(*) FROM tasks t WHERE t.folder_id = f.id AND t.is_completed = 1) AS completed
+                    (SELECT COUNT(*) FROM tasks t WHERE t.folder_id = f.id AND t.stage IN ('done','review')) AS completed
              FROM folders f ORDER BY f.created_at ASC, f.id ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -288,23 +321,26 @@ pub fn delete_folder(conn: &Connection, id: i64) -> Result<(), String> {
 pub fn list_tasks(conn: &Connection, folder_id: i64) -> Result<Vec<Task>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, folder_id, content, is_completed, created_at, sort_order, x, y, calendar_date
+            "SELECT id, folder_id, content, is_completed, stage, created_at, sort_order, x, y, calendar_date
              FROM tasks WHERE folder_id = ?1
              ORDER BY is_completed ASC, sort_order ASC, created_at ASC, id ASC",
         )
         .map_err(|e| e.to_string())?;
     let tasks = stmt
         .query_map([folder_id], |row| {
+            let stage = normalize_stage(Some(&row.get::<_, String>(4)?)).to_string();
+            let is_completed = row.get::<_, i64>(3)? != 0 || stage == "done";
             Ok(Task {
                 id: row.get(0)?,
                 folder_id: row.get(1)?,
                 content: row.get(2)?,
-                is_completed: row.get::<_, i64>(3)? != 0,
-                created_at: row.get(4)?,
-                sort_order: row.get(5)?,
-                x: row.get(6)?,
-                y: row.get(7)?,
-                calendar_date: row.get(8)?,
+                is_completed,
+                stage,
+                created_at: row.get(5)?,
+                sort_order: row.get(6)?,
+                x: row.get(7)?,
+                y: row.get(8)?,
+                calendar_date: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -314,10 +350,18 @@ pub fn list_tasks(conn: &Connection, folder_id: i64) -> Result<Vec<Task>, String
 }
 
 fn next_sort_order(conn: &Connection, folder_id: i64, is_completed: bool) -> Result<i64, String> {
+    // 保持向后兼容：按 stage 分组，'done' 与 'todo'/'review' 分开排序。
+    // 旧的 is_completed=true 视为 'done'；false 视为 'todo' 或 'review'（合并排序序列）。
+    let stage_filter = if is_completed { "done" } else { "todo" };
+    next_sort_order_for_stage(conn, folder_id, stage_filter)
+}
+
+/// 按 stage 分组计算下一个 sort_order（'todo' / 'review' / 'done' 独立序列）
+fn next_sort_order_for_stage(conn: &Connection, folder_id: i64, stage: &str) -> Result<i64, String> {
     let v: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM tasks WHERE folder_id = ?1 AND is_completed = ?2",
-            rusqlite::params![folder_id, is_completed as i64],
+            "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM tasks WHERE folder_id = ?1 AND stage = ?2",
+            rusqlite::params![folder_id, stage],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
@@ -339,8 +383,8 @@ pub fn create_task(
     let now = now_millis();
     let sort_order = next_sort_order(conn, folder_id, false)?;
     conn.execute(
-        "INSERT INTO tasks (folder_id, content, is_completed, created_at, sort_order, updated_at, x, y)
-         VALUES (?1, ?2, 0, ?3, ?4, ?3, ?5, ?6)",
+        "INSERT INTO tasks (folder_id, content, is_completed, stage, created_at, sort_order, updated_at, x, y)
+         VALUES (?1, ?2, 0, 'todo', ?3, ?4, ?3, ?5, ?6)",
         rusqlite::params![folder_id, content, now, sort_order, x, y],
     )
     .map_err(|e| e.to_string())?;
@@ -350,6 +394,46 @@ pub fn create_task(
         folder_id,
         content,
         is_completed: false,
+        stage: STAGE_TODO.to_string(),
+        created_at: now,
+        sort_order,
+        x,
+        y,
+        calendar_date: None,
+    })
+}
+
+/// 新建任务时可指定初始阶段（用于跨夹迁移保留 stage）。
+pub fn create_task_with_stage(
+    conn: &Connection,
+    folder_id: i64,
+    content: &str,
+    x: f64,
+    y: f64,
+    stage: &str,
+) -> Result<Task, String> {
+    let content = if content.trim().is_empty() {
+        "未命名任务".to_string()
+    } else {
+        content.trim().to_string()
+    };
+    let stage = normalize_stage(Some(stage)).to_string();
+    let is_completed = stage == STAGE_DONE;
+    let now = now_millis();
+    let sort_order = next_sort_order_for_stage(conn, folder_id, &stage)?;
+    conn.execute(
+        "INSERT INTO tasks (folder_id, content, is_completed, stage, created_at, sort_order, updated_at, x, y)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5, ?7, ?8)",
+        rusqlite::params![folder_id, content, is_completed as i64, stage, now, sort_order, x, y],
+    )
+    .map_err(|e| e.to_string())?;
+    let id = conn.last_insert_rowid();
+    Ok(Task {
+        id,
+        folder_id,
+        content,
+        is_completed,
+        stage,
         created_at: now,
         sort_order,
         x,
@@ -376,50 +460,64 @@ pub fn toggle_task(conn: &Connection, id: i64, is_completed: bool) -> Result<Tas
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
+    // is_completed 与 stage 的桥接：true → 'done'，false → 'todo'。
+    // 保留旧调用方（例如浏览器预览兜底）的二元语义。
+    let stage = if is_completed { "done" } else { "todo" };
     let sort_order = next_sort_order(conn, folder_id, is_completed)?;
     conn.execute(
-        "UPDATE tasks SET is_completed = ?1, sort_order = ?2, updated_at = ?3 WHERE id = ?4",
-        rusqlite::params![is_completed as i64, sort_order, now_millis(), id],
+        "UPDATE tasks SET is_completed = ?1, stage = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?5",
+        rusqlite::params![is_completed as i64, stage, sort_order, now_millis(), id],
     )
     .map_err(|e| e.to_string())?;
-    let content: String = conn
+    read_task(conn, id)
+}
+
+/// 把任务设置到指定阶段：'todo' / 'review' / 'done'。
+/// is_completed 与 stage 同步：只有 'done' 时 is_completed=1。
+/// sort_order 在同 stage 内重新分配（每阶段各自独立排序序列）。
+pub fn set_stage(conn: &Connection, id: i64, stage: &str) -> Result<Task, String> {
+    let stage = normalize_stage(Some(stage)).to_string();
+    let folder_id: i64 = conn
         .query_row(
-            "SELECT content FROM tasks WHERE id = ?1",
+            "SELECT folder_id FROM tasks WHERE id = ?1",
             rusqlite::params![id],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
-    let created_at: i64 = conn
+    let is_completed = stage == STAGE_DONE;
+    let sort_order = next_sort_order_for_stage(conn, folder_id, &stage)?;
+    conn.execute(
+        "UPDATE tasks SET is_completed = ?1, stage = ?2, sort_order = ?3, updated_at = ?4 WHERE id = ?5",
+        rusqlite::params![is_completed as i64, stage, sort_order, now_millis(), id],
+    )
+    .map_err(|e| e.to_string())?;
+    read_task(conn, id)
+}
+
+/// 读取单个任务（供 set_stage / toggle_task 复用）
+fn read_task(conn: &Connection, id: i64) -> Result<Task, String> {
+    let row: (i64, i64, String, i64, String, i64, i64, f64, f64, Option<String>) = conn
         .query_row(
-            "SELECT created_at FROM tasks WHERE id = ?1",
+            "SELECT id, folder_id, content, is_completed, stage, created_at, sort_order, x, y, calendar_date
+             FROM tasks WHERE id = ?1",
             rusqlite::params![id],
-            |row| row.get(0),
-        )
-        .map_err(|e| e.to_string())?;
-    let (x, y): (f64, f64) = conn
-        .query_row(
-            "SELECT x, y FROM tasks WHERE id = ?1",
-            rusqlite::params![id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| e.to_string())?;
-    let calendar_date: Option<String> = conn
-        .query_row(
-            "SELECT calendar_date FROM tasks WHERE id = ?1",
-            rusqlite::params![id],
-            |row| row.get(0),
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?,
+            )),
         )
         .map_err(|e| e.to_string())?;
     Ok(Task {
-        id,
-        folder_id,
-        content,
-        is_completed,
-        created_at,
-        sort_order,
-        x,
-        y,
-        calendar_date,
+        id: row.0,
+        folder_id: row.1,
+        content: row.2,
+        is_completed: row.3 != 0,
+        stage: normalize_stage(Some(&row.4)).to_string(),
+        created_at: row.5,
+        sort_order: row.6,
+        x: row.7,
+        y: row.8,
+        calendar_date: row.9,
     })
 }
 
@@ -458,23 +556,26 @@ pub fn delete_task(conn: &Connection, id: i64) -> Result<(), String> {
 pub fn list_calendar_tasks(conn: &Connection) -> Result<Vec<Task>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, folder_id, content, is_completed, created_at, sort_order, x, y, calendar_date
+            "SELECT id, folder_id, content, is_completed, stage, created_at, sort_order, x, y, calendar_date
              FROM tasks WHERE calendar_date IS NOT NULL
              ORDER BY calendar_date ASC, created_at ASC, id ASC",
         )
         .map_err(|e| e.to_string())?;
     let tasks = stmt
         .query_map([], |row| {
+            let stage = normalize_stage(Some(&row.get::<_, String>(4)?)).to_string();
+            let is_completed = row.get::<_, i64>(3)? != 0 || stage == STAGE_DONE;
             Ok(Task {
                 id: row.get(0)?,
                 folder_id: row.get(1)?,
                 content: row.get(2)?,
-                is_completed: row.get::<_, i64>(3)? != 0,
-                created_at: row.get(4)?,
-                sort_order: row.get(5)?,
-                x: row.get(6)?,
-                y: row.get(7)?,
-                calendar_date: row.get(8)?,
+                is_completed,
+                stage,
+                created_at: row.get(5)?,
+                sort_order: row.get(6)?,
+                x: row.get(7)?,
+                y: row.get(8)?,
+                calendar_date: row.get(9)?,
             })
         })
         .map_err(|e| e.to_string())?
