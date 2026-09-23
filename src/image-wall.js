@@ -35,13 +35,59 @@ async function miStrict(cmd, args) {
 /* ---------- localStorage 兜底（浏览器预览：直接存 base64，简单可靠） ---------- */
 const LS_FOLDERS = "glassCanvas.imageFolders";
 const LS_ITEMS   = "glassCanvas.imageItems";
+const LS_UNCOMBINE_SNAPSHOT_PREFIX = "glassCanvas.uncombine.";
+const LS_GROUPS  = "glassCanvas.imageGroups";
 function lsLoad() { try { return JSON.parse(localStorage.getItem(LS_FOLDERS) || "[]"); } catch { return []; } }
 function lsSave(a) { try { localStorage.setItem(LS_FOLDERS, JSON.stringify(a)); } catch {} }
 function lsLoadItems() { try { return JSON.parse(localStorage.getItem(LS_ITEMS) || "[]"); } catch { return []; } }
 function lsSaveItems(a) { try { localStorage.setItem(LS_ITEMS, JSON.stringify(a)); } catch {} }
+function lsLoadGroups() { try { return JSON.parse(localStorage.getItem(LS_GROUPS) || "{}"); } catch { return {}; } }
+function lsSaveGroups(o) { try { localStorage.setItem(LS_GROUPS, JSON.stringify(o)); } catch {} }
+/* 「取消组合」快照：key 是组合图的 itemId。
+ * 每张组合图独立记一份原图（元数据 + 完整字节 base64），拆哪个组合就查哪个 key，
+ * 这样「↩ 拆分」按钮只针对当前选中的那张组合图生效，互不影响。 */
+function loadUncombineSnapshot(comboItemId) {
+  try {
+    const v = localStorage.getItem(LS_UNCOMBINE_SNAPSHOT_PREFIX + comboItemId);
+    if (!v) return null;
+    return JSON.parse(v);
+  } catch { return null; }
+}
+function saveUncombineSnapshot(comboItemId, snap) {
+  try { localStorage.setItem(LS_UNCOMBINE_SNAPSHOT_PREFIX + comboItemId, JSON.stringify(snap)); return true; }
+  catch (e) {
+    // 字节太大塞不进 localStorage（5MB 附近）时退化为不存快照，
+    // 「↩ 取消组合」按钮对这张组合图就自然不可用；组合流程本身不受影响。
+    console.warn("[图片墙] 取消组合快照保存失败（localStorage 可能已满）:", e);
+    return false;
+  }
+}
+function clearUncombineSnapshot(comboItemId) {
+  try { localStorage.removeItem(LS_UNCOMBINE_SNAPSHOT_PREFIX + comboItemId); } catch {}
+}
 let lsFolders  = lsLoad();
 let lsItems    = lsLoadItems();
 let _lsIdSeq   = 0;
+
+/* ---------- 分组（Group） ----------
+ * 一个 group = 一个 id + 若干 itemId。
+ * 数据存 localStorage，key = groupId；value = [itemId, ...]。
+ * 复制图片：副本不带 groupId（脱离分组）。
+ * 删除图片：自动从所属 group 中移除；如果 group 变成空就删掉 group。
+ * 组合（合成 PNG）不受分组影响，也不受分组约束。 */
+let groups = lsLoadGroups();
+function persistGroups() { lsSaveGroups(groups); }
+function groupForItem(id) {
+  for (const [gid, members] of Object.entries(groups)) {
+    if (members && members.includes(id)) return gid;
+  }
+  return null;
+}
+function getGroupMembers(groupId) {
+  const m = groups[groupId];
+  if (!m) return [];
+  return m.filter(id => items.some(it => it.id === id));
+}
 
 /* ---------- 工具 ---------- */
 function esc(s) {
@@ -112,6 +158,15 @@ const imageMetaEl     = $("image-meta");
 const imageToolbar    = $("image-toolbar");
 const imageAddBtn     = $("image-add");
 const imageCombineBtn = $("image-combine");
+const imageUncombineBtn = $("image-uncombine");
+const imageGroupBtn   = $("image-group");
+const imageUngroupBtn = $("image-ungroup");
+const imageAlignLeftBtn    = $("align-left");
+const imageAlignRightBtn   = $("align-right");
+const imageAlignTopBtn     = $("align-top");
+const imageAlignBottomBtn  = $("align-bottom");
+const imageAlignCenterHBtn = $("align-center-h");
+const imageAlignCenterVBtn = $("align-center-v");
 const imageZoomOutBtn = $("image-zoom-out");
 const imageZoomInBtn  = $("image-zoom-in");
 const imageZoomLabel  = $("image-zoom-label");
@@ -329,6 +384,7 @@ function renderItems() {
     el.style.height = (it.height || CARD_DEFAULT_W) + "px";
     el.style.zIndex = it.z || zTop++;
     el.classList.toggle("selected", selection.has(it.id));
+    el.classList.toggle("grouped", !!groupForItem(it.id));
   }
   for (const [id, el] of itemEls) {
     if (!seen.has(id)) { el.remove(); itemEls.delete(id); }
@@ -416,14 +472,21 @@ function bindCardEvents(el, it) {
 
 function selectItem(id, additive) {
   if (additive) {
+    // Ctrl+点击：切换单张（对齐/多选场景）
     if (selection.has(id)) selection.delete(id);
     else selection.add(id);
   } else {
+    // 普通点击：如果点在组里的一张，整个组都选中；否则只选自己
+    const gid = groupForItem(id);
     selection.clear();
-    selection.add(id);
+    if (gid) {
+      for (const mid of getGroupMembers(gid)) selection.add(mid);
+    } else {
+      selection.add(id);
+    }
   }
   for (const [iid, el] of itemEls) el.classList.toggle("selected", selection.has(iid));
-  syncCombineBtn();
+  syncImageToolbarBtns();
 }
 /* ---------- 组合按钮显隐：只有选中 ≥2 张时启用 ---------- */
 function syncCombineBtn() {
@@ -433,11 +496,160 @@ function syncCombineBtn() {
     imageCombineBtn.title = `组合 ${selection.size} 张选中图片（Ctrl+M）`;
   }
 }
+/* ---------- 取消组合按钮显隐：只有恰好选中一张「有快照的组合图」时启用 ---------- */
+function syncUncombineBtn() {
+  if (!imageUncombineBtn) return;
+  const t = getSelectedComboItem();
+  imageUncombineBtn.hidden = !t;
+  if (t) {
+    imageUncombineBtn.title = `拆分这张组合图（恢复 ${t.snap.sources.length} 张原图，Ctrl+Z）`;
+  } else {
+    imageUncombineBtn.title = "选中一张组合图片后可拆分（Ctrl+Z）";
+  }
+}
+/* 一次调用同步两个按钮的显隐，任何 selection 变化后都调用它，避免遗漏。 */
+function syncImageToolbarBtns() {
+  syncCombineBtn();
+  syncUncombineBtn();
+  syncGroupBtns();
+  syncAlignBtns();
+}
+/* ---------- 分组 / 解散按钮显隐 ---------- */
+function syncGroupBtns() {
+  if (!imageGroupBtn) return;
+  if (selection.size < 2) {
+    imageGroupBtn.hidden = true;
+  } else {
+    // 分组按钮：选中 ≥2 张时可见，但如果其中任何一张已经在组里，也允许——
+    // 只是新建的组是独立于原组的（成员从旧组剥离进新组）。
+    imageGroupBtn.hidden = false;
+    imageGroupBtn.title = `把选中的 ${selection.size} 张图编为一组（Ctrl+Shift+G）`;
+  }
+  if (!imageUngroupBtn) return;
+  // 解散按钮：当前 selection 全部属于同一个 group，且该 group 至少 2 个成员
+  const gid = getCommonGroupOfSelection();
+  if (gid) {
+    const members = getGroupMembers(gid);
+    imageUngroupBtn.hidden = members.length < 2;
+    if (members.length >= 2) imageUngroupBtn.title = `解散这个组（共 ${members.length} 张，Ctrl+Shift+U）`;
+  } else {
+    imageUngroupBtn.hidden = true;
+    imageUngroupBtn.title = "选中一个组的成员后可解散（Ctrl+Shift+U）";
+  }
+}
+function getCommonGroupOfSelection() {
+  if (selection.size === 0) return null;
+  const ids = Array.from(selection);
+  const g0 = groupForItem(ids[0]);
+  if (!g0) return null;
+  for (let i = 1; i < ids.length; i++) {
+    if (groupForItem(ids[i]) !== g0) return null;
+  }
+  return g0;
+}
+/* ---------- 对齐按钮显隐 ---------- */
+function syncAlignBtns() {
+  const btns = [imageAlignLeftBtn, imageAlignRightBtn, imageAlignTopBtn,
+                imageAlignBottomBtn, imageAlignCenterHBtn, imageAlignCenterVBtn];
+  // 对齐只对「组内多选」开放：selection ≥2 且全部属于同一个 group
+  const gid = getCommonGroupOfSelection();
+  const enabled = !!(gid && selection.size >= 2);
+  for (const b of btns) {
+    if (!b) continue;
+    b.hidden = !enabled;
+    if (enabled) b.title = b.title.replace(/（.*?）/, `（组内 ${selection.size} 张选中）`);
+  }
+}
+
+/* ---------- 分组操作 ---------- */
+function groupSelected() {
+  if (selection.size < 2) { toast("请至少选中 2 张图片再分组", 3000); return; }
+  const ids = Array.from(selection);
+  // 必须先于「写入新组」计算出各 id 当前的所属组，
+  // 否则 groupForItem() 会把刚写入的新组也当成旧组来处理。
+  const oldGidOf = ids.map(id => groupForItem(id));
+  const newGid = "g-" + uid();
+  groups[newGid] = ids.slice();
+  // 从旧组里剔除这些 id（如果原来各自在某组里）
+  const gidsToClean = new Set(oldGidOf.filter(Boolean));
+  for (const oldGid of gidsToClean) {
+    groups[oldGid] = (groups[oldGid] || []).filter(id => !selection.has(id));
+    if (groups[oldGid].length === 0) delete groups[oldGid];
+  }
+  persistGroups();
+  renderItems();
+  syncImageToolbarBtns();
+  toast(`已分组（${ids.length} 张）`);
+}
+function ungroupSelected() {
+  const gid = getCommonGroupOfSelection();
+  if (!gid) { toast("请先选中一个组的成员", 2500); return; }
+  delete groups[gid];
+  persistGroups();
+  renderItems();
+  syncImageToolbarBtns();
+  toast("已解散分组");
+}
+
+/* ---------- 对齐操作（仅对组内多选生效） ----------
+ * 对齐基准 = 组内选中的图（selection 里的那部分）。
+ * 对齐到最外侧：左 = 所有选中图的最左 x 一致；右 = 右边缘一致；
+ *              上 = 所有选中图的最上 y 一致；下 = 下边缘一致；
+ *              水平居中 = 中心 x 一致；垂直居中 = 中心 y 一致。 */
+function applyAlignment(which) {
+  const gid = getCommonGroupOfSelection();
+  if (!gid) { toast("对齐只能在同一个组内进行", 2500); return; }
+  const sel = items.filter(it => selection.has(it.id));
+  if (sel.length < 2) return;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let centerSumX = 0, centerSumY = 0;
+  for (const it of sel) {
+    const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
+    minX = Math.min(minX, it.x);
+    maxX = Math.max(maxX, it.x + w);
+    minY = Math.min(minY, it.y);
+    maxY = Math.max(maxY, it.y + h);
+    centerSumX += it.x + w / 2;
+    centerSumY += it.y + h / 2;
+  }
+  const avgCenterX = centerSumX / sel.length;
+  const avgCenterY = centerSumY / sel.length;
+  for (const it of sel) {
+    const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
+    if (which === "left")           it.x = minX;
+    else if (which === "right")     it.x = maxX - w;
+    else if (which === "top")       it.y = minY;
+    else if (which === "bottom")    it.y = maxY - h;
+    else if (which === "center-h")  it.x = avgCenterX - w / 2;
+    else if (which === "center-v")  it.y = avgCenterY - h / 2;
+    const el = itemEls.get(it.id);
+    if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+  }
+  // 落盘：把内存里最新值直接写入 localStorage（不走 debounce，保证下一次点击前数据是新的）
+  for (const it of sel) {
+    const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
+    const idx = items.findIndex(x => x.id === it.id);
+    if (idx >= 0) {
+      // 如果 items[i] 是同一个引用，x/y 已经改好；如果不是则同步一下
+      if (items[idx] !== it) { items[idx].x = it.x; items[idx].y = it.y; }
+    }
+    apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+  }
+  const label = { "left":"左对齐","right":"右对齐","top":"上对齐","bottom":"下对齐","center-h":"水平居中","center-v":"垂直居中" }[which] || "对齐";
+  toast(`${label}（${sel.length} 张）`);
+}
 function bringToFront(it) {
-  it.z = ++zTop;
-  const el = itemEls.get(it.id);
-  if (el) el.style.zIndex = it.z;
-  debouncedSaveItem(it.id);
+  // 分组语义：把整组都拉到前面，否则组内 z 序会乱
+  const gid = groupForItem(it.id);
+  const targets = gid ? getGroupMembers(gid) : [it.id];
+  for (const id of targets) {
+    const t = items.find(x => x.id === id);
+    if (!t) continue;
+    t.z = ++zTop;
+    const el = itemEls.get(id);
+    if (el) el.style.zIndex = t.z;
+    debouncedSaveItem(id);
+  }
 }
 function debouncedSaveItem(id) {
   if (_itemSaveTimers.has(id)) clearTimeout(_itemSaveTimers.get(id));
@@ -449,21 +661,37 @@ function debouncedSaveItem(id) {
   }, 350));
 }
 
-/* ---------- 拖拽：卡片移动 ---------- */
+/* ---------- 拖拽：卡片移动 ----------
+ * 分组语义：
+ *   - 普通点击组内某张 → 整个组一起拖
+ *   - Ctrl+部分选中（含或不含组内图）→ 拖动 selection 中的所有卡片
+ *   - 单张（无分组、非多选）→ 拖动自己
+ */
 function startCardDrag(e, it, el) {
   const start = { x: e.clientX, y: e.clientY, ix: it.x, iy: it.y };
+  // 拖动候选：当前 selection 里的所有卡片；空选择时就是当前 this
+  const drags = [];
+  if (selection.size > 1) {
+    for (const id of selection) {
+      const t = items.find(x => x.id === id);
+      if (t) drags.push({ it: t, el: itemEls.get(id), sx: t.x, sy: t.y });
+    }
+  } else {
+    drags.push({ it, el, sx: it.x, sy: it.y });
+  }
   const move = (ev) => {
     const dx = (ev.clientX - start.x) / view.zoom;
     const dy = (ev.clientY - start.y) / view.zoom;
-    it.x = start.ix + dx;
-    it.y = start.iy + dy;
-    el.style.left = it.x + "px";
-    el.style.top = it.y + "px";
+    for (const d of drags) {
+      d.it.x = d.sx + dx;
+      d.it.y = d.sy + dy;
+      if (d.el) { d.el.style.left = d.it.x + "px"; d.el.style.top = d.it.y + "px"; }
+    }
   };
   const up = () => {
     document.removeEventListener("mousemove", move);
     document.removeEventListener("mouseup", up);
-    debouncedSaveItem(it.id);
+    for (const d of drags) debouncedSaveItem(d.it.id);
   };
   document.addEventListener("mousemove", move);
   document.addEventListener("mouseup", up);
@@ -585,7 +813,14 @@ async function removeItem(id) {
   selection.delete(id);
   const el = itemEls.get(id);
   if (el) { el.remove(); itemEls.delete(id); }
-  syncCombineBtn();
+  // 从所属 group 里剔除；如果 group 空了就删掉这个 group
+  const gid = groupForItem(id);
+  if (gid) {
+    groups[gid] = (groups[gid] || []).filter(x => x !== id);
+    if (groups[gid].length === 0) delete groups[gid];
+    else persistGroups();
+  }
+  syncImageToolbarBtns();
   // 同步侧栏计数到内存 folders[] 和 localStorage（之前只改内存，刷新后又归零）
   syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
   renderFolderList();
@@ -635,6 +870,27 @@ async function combineSelected() {
   try {
     const PAD = 16;
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    // 提前把所有原图的字节读出来，既供 canvas 使用，也供「取消组合」快照保存。
+    // 这里若某张读取失败就 continue 掉，不影响整体合成（与原实现一致）。
+    const srcSnapshots = [];
+    for (const it of sel) {
+      const bytes = await apiReadImageBytes(it);
+      if (bytes) {
+        srcSnapshots.push({
+          id: it.id,
+          folder_id: it.folder_id ?? activeFolder.id,
+          file_name: it.file_name,
+          file_path: it.file_path,
+          title: it.title || "",
+          x: it.x, y: it.y,
+          width: it.width || CARD_DEFAULT_W,
+          height: it.height || CARD_DEFAULT_W,
+          created_at: it.created_at,
+          bytes: bytesToBase64(bytes),
+          mime: guessMime(it.file_path || it.file_name || ""),
+        });
+      }
+    }
     for (const it of sel) {
       const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
       minX = Math.min(minX, it.x); minY = Math.min(minY, it.y);
@@ -648,13 +904,11 @@ async function combineSelected() {
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    for (const it of sel) {
-      const bytes = await apiReadImageBytes(it);
-      if (!bytes) continue;
-      const img = await loadImageFromBytes(bytes, guessMime(it.file_path || it.file_name || ""));
+    for (const snap of srcSnapshots) {
+      const bytes = Uint8Array.from(atob(snap.bytes), c => c.charCodeAt(0));
+      const img = await loadImageFromBytes(bytes, snap.mime);
       if (!img) continue;
-      const w = it.width || CARD_DEFAULT_W, h = it.height || CARD_DEFAULT_W;
-      ctx.drawImage(img, PAD + (it.x - minX), PAD + (it.y - minY), w, h);
+      ctx.drawImage(img, PAD + (snap.x - minX), PAD + (snap.y - minY), snap.width, snap.height);
     }
     const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
     if (!blob) { toast("组合失败：无法生成图片", 3500); return; }
@@ -669,24 +923,154 @@ async function combineSelected() {
     newItem.z = ++zTop;
     items.push(newItem);
     debouncedSaveItem(newItem.id);
+    // 保存「取消组合」快照：key = 组合图的 itemId，
+    // 这样每张组合图独立记一份原图快照，拆哪个组合就查哪个 key，互不影响。
+    // 必须在删掉原图之前完成，否则恢复时拿不到原图字节。
+    saveUncombineSnapshot(newItem.id, {
+      folderId: activeFolder.id,
+      comboItemId: newItem.id,
+      comboFileName: fileName,
+      comboFilePath: newItem.file_path,
+      sources: srcSnapshots,
+      comboDims: { width: canvas.width, height: canvas.height },
+      createdAt: nowTs(),
+    });
     // 移除原图
     for (const id of sel.map(it => it.id)) {
       try { await apiDeleteItem(id); } catch (err) { console.warn("[图片墙] 删除原图失败:", id, err); }
     }
     items = items.filter(x => !sel.some(s => s.id === x.id));
+    // 从所有 group 里剔除被合并掉的 ID；空组直接删除
+    const deletedIds = new Set(sel.map(it => it.id));
+    for (const [gid, members] of Object.entries(groups)) {
+      const filtered = (members || []).filter(mid => !deletedIds.has(mid));
+      if (filtered.length === 0) delete groups[gid];
+      else groups[gid] = filtered;
+    }
+    persistGroups();
     selection.clear();
     syncFolderTotal(activeFolder, items.length);
     renderFolderList();
     renderItems();
     updateEmpty();
     updateHeader();
-    syncCombineBtn();
+    syncImageToolbarBtns();
     toast(`已组合 ${sel.length} 张图片`, 2500);
   } catch (err) {
     console.error("[图片墙] 组合失败:", err);
     toast("组合失败：" + (err.message || String(err)).slice(0, 60), 3500);
   } finally {
     if (imageCombineBtn) { imageCombineBtn.disabled = false; imageCombineBtn.textContent = "⧉ 组合"; }
+  }
+}
+
+/* ---------- 按当前选中的组合图拆分 ----------
+ * 语义：用户选中的一张「组合图片」，点「↩ 取消组合」就拆那张，恢复出它被合成前的原图，
+ * 删掉这张组合图；其他组合图、其他普通图完全不受影响。
+ *
+ * 快照查找：
+ *   1. 先按 itemId 直接查 glassCanvas.uncombine.<itemId>。
+ *   2. 若直接查不到（比如是 Tauri 桌面模式下存的，重启后 localStorage 为空），
+ *      就遍历所有 glassCanvas.uncombine.* 快照，看哪一份的 comboItemId / comboFilePath 匹配
+ *      当前选中的 item —— 这样即使快照文件没删，也能恢复。
+ */
+function findSnapshotForItem(item) {
+  if (!item) return null;
+  // 快速路径：直接按 itemId 查
+  const direct = loadUncombineSnapshot(item.id);
+  if (direct && Array.isArray(direct.sources) && direct.sources.length >= 2) return direct;
+  // 兜底：扫描所有快照，看哪一份的 comboItemId 或 file_name/file_path 匹配当前 item
+  try {
+    const matches = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(LS_UNCOMBINE_SNAPSHOT_PREFIX)) continue;
+      try {
+        const s = JSON.parse(localStorage.getItem(k));
+        if (!s || !Array.isArray(s.sources) || s.sources.length < 2) continue;
+        if (s.comboItemId === item.id) matches.push(s);
+        else if (s.comboFileName && item.file_name && s.comboFileName === item.file_name) matches.push(s);
+        else if (s.comboFilePath && item.file_path && s.comboFilePath === item.file_path) matches.push(s);
+      } catch { /* ignore */ }
+    }
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) return matches.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+  } catch {}
+  return null;
+}
+function getSelectedComboItem() {
+  // 只在恰好选中 1 张、且这张有可用的组合快照时，才认为「可拆分」
+  if (selection.size !== 1) return null;
+  const id = Array.from(selection)[0];
+  const it = items.find(x => x.id === id);
+  if (!it) return null;
+  const snap = findSnapshotForItem(it);
+  if (!snap) return null;
+  return { item: it, snap };
+}
+async function uncombineSelected() {
+  if (!activeFolder) { toast("请先选择一个图片夹", 3500); return; }
+  const target = getSelectedComboItem();
+  if (!target) {
+    // 按当前选择状态给出更准确的提示
+    let hint;
+    if (selection.size === 0) hint = "请先选中一张组合图片";
+    else if (selection.size > 1) hint = "请只选中一张组合图片（不能多选）";
+    else hint = "这张图片没有可撤销的组合信息";
+    toast(hint, 2500);
+    syncImageToolbarBtns();
+    return;
+  }
+  const { item, snap } = target;
+  // 快照记录的原夹与当前激活夹不一致时，切回原夹（跨夹误触的保护）
+  if (snap.folderId != null && activeFolder.id !== snap.folderId) {
+    await setActiveFolder(snap.folderId);
+  }
+  if (imageUncombineBtn) { imageUncombineBtn.disabled = true; imageUncombineBtn.textContent = "↩ 拆分中…"; }
+  try {
+    // 1. 恢复原图：位置就放在「组合图原先所在的位置」（不还原到组合前的坐标），
+    //    尺寸用快照里记的原图自身宽高（不是组合图的尺寸）。
+    const dropX = item.x, dropY = item.y;
+    const restored = [];
+    for (const src of snap.sources) {
+      const bytes = Uint8Array.from(atob(src.bytes), c => c.charCodeAt(0));
+      const it = await apiSaveImage(src.folder_id ?? activeFolder.id, src.file_name, src.title || "图片", bytes);
+      if (!it) continue;
+      it.x = dropX; it.y = dropY;
+      it.width = src.width || CARD_DEFAULT_W;
+      it.height = src.height || CARD_DEFAULT_W;
+      it.z = ++zTop;
+      items.push(it);
+      restored.push(it);
+      debouncedSaveItem(it.id);
+    }
+    // 2. 删除组合图
+    try { await apiDeleteItem(item.id); }
+    catch (err) { console.warn("[图片墙] 删除组合图失败:", err); }
+    items = items.filter(x => x.id !== item.id);
+    // 从所属 group 里剔除组合图 ID；空组直接删除（和 removeItem 逻辑一致）
+    const gid = groupForItem(item.id);
+    if (gid) {
+      groups[gid] = (groups[gid] || []).filter(x => x !== item.id);
+      if (groups[gid].length === 0) delete groups[gid];
+      else persistGroups();
+    }
+    // 3. 清除快照（只清这份，其他组合的快照保留）
+    clearUncombineSnapshot(item.id);
+    selection.delete(item.id);
+    // 4. 刷新视图
+    syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
+    renderFolderList();
+    renderItems();
+    updateEmpty();
+    updateHeader();
+    syncImageToolbarBtns();
+    toast(`已拆分，恢复 ${restored.length} 张图片`, 2500);
+  } catch (err) {
+    console.error("[图片墙] 取消组合失败:", err);
+    toast("取消组合失败：" + (err.message || String(err)).slice(0, 60), 3500);
+  } finally {
+    if (imageUncombineBtn) { imageUncombineBtn.disabled = false; imageUncombineBtn.textContent = "↩ 拆分"; }
   }
 }
 
@@ -1149,6 +1533,15 @@ function bindToolbar() {
   });
   if (imageFitBtn) imageFitBtn.addEventListener("click", () => fitView());
   if (imageCombineBtn) imageCombineBtn.addEventListener("click", () => combineSelected());
+  if (imageUncombineBtn) imageUncombineBtn.addEventListener("click", () => uncombineSelected());
+  if (imageGroupBtn) imageGroupBtn.addEventListener("click", () => groupSelected());
+  if (imageUngroupBtn) imageUngroupBtn.addEventListener("click", () => ungroupSelected());
+  if (imageAlignLeftBtn)    imageAlignLeftBtn.addEventListener("click", () => applyAlignment("left"));
+  if (imageAlignRightBtn)   imageAlignRightBtn.addEventListener("click", () => applyAlignment("right"));
+  if (imageAlignTopBtn)     imageAlignTopBtn.addEventListener("click", () => applyAlignment("top"));
+  if (imageAlignBottomBtn)  imageAlignBottomBtn.addEventListener("click", () => applyAlignment("bottom"));
+  if (imageAlignCenterHBtn) imageAlignCenterHBtn.addEventListener("click", () => applyAlignment("center-h"));
+  if (imageAlignCenterVBtn) imageAlignCenterVBtn.addEventListener("click", () => applyAlignment("center-v"));
 }
 
 /* ---------- 键盘：Delete 删除选中，Ctrl+M 组合选中 ---------- */
@@ -1162,6 +1555,29 @@ function bindKeyboard() {
         (e.key === "m" || e.key === "M")) {
       e.preventDefault();
       combineSelected();
+      return;
+    }
+    // Ctrl+Z / Cmd+Z：拆分当前选中的那张组合图（没选中或选中的非组合图则不拦截）
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
+        (e.key === "z" || e.key === "Z")) {
+      if (getSelectedComboItem()) {
+        e.preventDefault();
+        uncombineSelected();
+        return;
+      }
+    }
+    // Ctrl+Shift+G：把当前选中的 2+ 张图编为一组
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey &&
+        (e.code === "KeyG")) {
+      e.preventDefault();
+      groupSelected();
+      return;
+    }
+    // Ctrl+Shift+U：解散当前 selection 所属的组（全部属于同一个组时才生效）
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey &&
+        (e.code === "KeyU")) {
+      e.preventDefault();
+      ungroupSelected();
       return;
     }
     if ((e.key === "Delete" || e.key === "Backspace") && selection.size) {
@@ -1231,5 +1647,7 @@ function init() {
   window.__loadImageWall = () => loadFolders(true);
   // 初始加载一次（如果图片 tab 一开始就是 active 会显示）
   loadFolders(true);
+  // 刷新页面后按钮状态同步：让「↩ 取消组合」在存在快照时立即可见
+  syncUncombineBtn();
 }
 init();

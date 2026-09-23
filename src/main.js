@@ -1436,9 +1436,16 @@ function relayout(initial) {
   // 越界清理：分界线随已完成内容下移后，原先紧贴分界线下方摆放的待完成块会
   // 被「顶」进已完成区、被堆叠的已完成内容压住（如 E12 拖入后淹没了「123」）。
   // 这里把上沿仍在分界线之上的待完成块逐个推回分界线下方的空位并立即落盘；
-  // 下移会腾出空位，后续越界块再落进来，链式补位直到无重叠
+  // 下移会腾出空位，后续越界块再落进来，链式补位直到无重叠。
+  // 刚新建的块（__justCreated）跳过：其 y 由创建入口设为分界线下方（如 dy+34），
+  // 若本轮完成区高度变化把 dy 顶到它之上，findFreeSpot(fromTop) 会把它抢跑到
+  // 分界线正下方第一行，视觉上就是「刚输入的新任务被顶上去、不再留在最底部」。
+  // 该标记在创建时写入一次后不清除；因为创建入口始终把 y 放在 dy 附近，
+  // 后续 relayout 只会跳过它而不改变其坐标（除非用户拖拽/对齐，那些操作
+  // 本身就会重写 b.y，标志位随之失效）。无需消费即清空。
   for (const b of blocks) {
     if (b.done) continue;
+    if (b.__justCreated) continue;
     const el3 = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el3) continue;
     if (b.y < dy) {
@@ -1904,6 +1911,7 @@ canvas.addEventListener("dblclick", e => {
   const y = clickY > dy + 24 ? Math.round(clickY) : Math.round(dy + 34);
   api.createTask(activeFolderId, "", x, y).then(nb => {
     nb.title = ""; // 新建时先显示空内容，直接编辑
+    nb.__justCreated = true; // 标记：本轮 relayout 保护其初始 y，避免被 findFreeSpot 顶到分界线正下方
     blocks.push(nb);
     renderAll();
     // 对齐模式下立即把新块塞到栈底，视觉与「输入内容后追加到最下边行」一致
@@ -1944,6 +1952,7 @@ async function createTasksFromPaste(text, clientX, clientY) {
   const created = [];
   for (let i = 0; i < lines.length; i++) {
     const nb = await api.createTask(activeFolderId, lines[i], px, py + i * GAP);
+    nb.__justCreated = true; // 同双击创建：保护本轮 relayout 的初始 y
     blocks.push(nb);
     created.push(nb);
   }

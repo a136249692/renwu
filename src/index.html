@@ -129,7 +129,19 @@
             </div>
             <div class="mind-toolbar" id="image-toolbar" hidden>
               <button id="image-add" title="上传图片">＋ 上传</button>
-              <button id="image-combine" title="组合选中图片（Ctrl+M）" hidden>⧉ 组合</button>
+              <button id="image-combine" title="组合选中图片（Ctrl+M）：合成一张新 PNG" hidden>⧉ 组合</button>
+              <button id="image-uncombine" title="选中一张组合图片后可拆分（Ctrl+Z）" hidden>↩ 拆分</button>
+              <span class="tb-sep" aria-hidden="true"></span>
+              <button id="image-group" title="把选中图片编为一组（Ctrl+Shift+G）" hidden>🗂 分组</button>
+              <button id="image-ungroup" title="解散整个组（Ctrl+Shift+U）" hidden>✕ 解散</button>
+              <span class="tb-sep" aria-hidden="true"></span>
+              <button id="align-left"  title="左对齐（组内选中的图）" hidden>⇤</button>
+              <button id="align-right" title="右对齐（组内选中的图）" hidden>⇥</button>
+              <button id="align-top"   title="上对齐（组内选中的图）" hidden>⤒</button>
+              <button id="align-bottom" title="下对齐（组内选中的图）" hidden>⤓</button>
+              <button id="align-center-h" title="水平居中（组内选中的图）" hidden>⫷⫸</button>
+              <button id="align-center-v" title="垂直居中（组内选中的图）" hidden>⫶⫷</button>
+              <span class="tb-sep" aria-hidden="true"></span>
               <button id="image-zoom-out" title="缩小">−</button>
               <span id="image-zoom-label">100%</span>
               <button id="image-zoom-in" title="放大">＋</button>

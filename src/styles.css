@@ -1174,6 +1174,14 @@ mark {
 .img-card.selected {
   box-shadow: 0 0 0 2px var(--accent), 0 10px 26px rgba(59,110,245,0.22);
 }
+/* 分组内的卡片：加一圈彩色虚线内框，与"选中"的实心外框区分开 */
+.img-card.grouped {
+  outline: 2px dashed rgba(99, 102, 241, 0.55);
+  outline-offset: 4px;
+}
+.img-card.grouped.selected {
+  outline-color: rgba(99, 102, 241, 0.85);
+}
 .card-img-wrap {
   /* flex:1 让 wrap 占据除 caption 外的所有剩余空间，
      不再写死 aspect-ratio: 1/1，否则 se/s 手柄拖小时高度分配会被撑回 1:1 导致视觉不缩小 */
