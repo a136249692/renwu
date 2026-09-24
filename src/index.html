@@ -85,6 +85,8 @@
                 <span class="label top" id="review-label-top">待确认</span>
                 <span class="label bottom" id="pending-label">待完成</span>
               </div>
+              <button id="load-more-done" class="load-more-chip" hidden title="点击加载更早的已完成记录">⋯ 加载更多</button>
+              <div class="drag-zone-hint" id="drag-zone-hint" hidden></div>
               <div class="guide v" id="guide-v" hidden></div>
               <div class="guide h" id="guide-h" hidden></div>
               <div class="done-hint" id="done-hint" hidden>把块拖到上方分界线即为完成，中间为待确认</div>
@@ -201,14 +203,6 @@
           <button id="open-data-dir" class="link-btn">打开</button>
         </div>
         <div class="setting-row setting-row-btn">
-          <span class="setting-label">导出数据<br /><small>把所有任务夹与任务导出为 JSON 备份文件</small></span>
-          <button id="export-btn" class="link-btn">导出</button>
-        </div>
-        <div class="setting-row setting-row-btn">
-          <span class="setting-label">导入数据<br /><small>从导出的 JSON 备份恢复（会覆盖当前任务数据）</small></span>
-          <button id="import-btn" class="link-btn">导入</button>
-        </div>
-        <div class="setting-row setting-row-btn">
           <span class="setting-label">完整备份<br /><small>把数据库、全部图片与配置打成一个 zip，用于迁移到其他电脑</small></span>
           <button id="backup-btn" class="link-btn">备份</button>
         </div>
@@ -273,7 +267,6 @@
       </div>
     </div>
 
-    <input type="file" id="import-file" accept="application/json" hidden />
     <input type="file" id="image-file-input" accept="image/*" multiple hidden />
     <script type="module" src="./main.js"></script>
     <script type="module" src="./mindmap.js"></script>

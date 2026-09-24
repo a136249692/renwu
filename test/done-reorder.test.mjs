@@ -42,15 +42,18 @@ function normalizeStage(s) {
 
 // ── 模拟 layoutStackedRows：通用堆叠区布局（stage: 'done' | 'review'）──
 // 与 main.js 中的实现语义一致：
-//   · 'date' 模式：按 createdAt 升序（旧→新）
+//   · 'date' 模式：按 createdAt 升序（旧→新，最新的排段底）
 //   · 'manual' 模式：按 y 位置排序
 //   · originY 是该段的顶部起点 y
 //   · insertB 为「刚拖入该区」的块：按 drop 时的 y 相对已有块的位置决定插入索引
-function layoutStackedRows(blocks, stage, originY, insertB) {
+//   · tailLimit 为可选：只保留排序后的最后 N 条（供 done 段分页展示，最新 N 条在段底）
+function layoutStackedRows(blocks, stage, originY, insertB, tailLimit) {
   const mode = getDoneSortMode();
-  const others = blocks.filter(b => normalizeStage(b.stage) === stage && b !== insertB).sort(
+  let all = blocks.filter(b => normalizeStage(b.stage) === stage && b !== insertB).sort(
     mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
   );
+  if (tailLimit != null && all.length > tailLimit) all = all.slice(all.length - tailLimit);
+  const others = all;
   let insertIdx = others.length;
   if (insertB) {
     const dropCenter = insertB.y;

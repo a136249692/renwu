@@ -1152,7 +1152,10 @@ async function renderFolderList() {
     `;
     li.addEventListener("click", e => {
       if (e.target.closest(".rm")) { e.stopPropagation(); return; }
-      setActiveFolder(f.id);
+      // 已经是当前激活夹时不再重设，否则 setActiveFolder 内部会 renderFolderList()
+      // 把当前 <li> DOM 节点换掉；紧接着的 dblclick 事件虽然仍会触发，但拿到的
+      // li 参数已是从属已离开的旧节点，input 替换上去之后不在文档树里，重命名会"闪一下就没了"。
+      if (activeFolderId !== f.id) setActiveFolder(f.id);
     });
     li.addEventListener("dblclick", e => {
       if (e.target.closest(".rm")) return;
@@ -1200,7 +1203,6 @@ function startImageFolderDrag(e, srcId, srcEl) {
   // 已经在拖动另一个夹
   if (_imgFoldDragSrc != null) return;
 
-  e.preventDefault();
   const startX = e.clientX, startY = e.clientY;
   let activated = false;
   let lastX = startX, lastY = startY;

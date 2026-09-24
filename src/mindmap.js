@@ -253,6 +253,13 @@ function setMode(m) {
   // 图片墙模块自行注册加载钩子（image-wall.js 里挂到 window），
   // 这里只负责在切到图片模式时触发，避免本模块反向依赖图片墙实现。
   if (m === "images") requestAnimationFrame(() => window.__loadImageWall && window.__loadImageWall());
+  // 切回任务 tab 时：canvas 从 display:none 恢复后 clientHeight 在单帧内
+  // 可能还没就绪（浏览器尚未完成 reflow），此时 relayout 会用 0 尺寸算分界线、
+  // 把堆叠块挤到画布顶部 → 视觉上"内容块错乱"。用双 rAF：第一帧触发 reflow，
+  // 第二帧 clientHeight 已正确，再 renderAll + relayout 重算分界线位置。
+  if (m === "tasks") {
+    requestAnimationFrame(() => requestAnimationFrame(() => { renderAll && renderAll(); }));
+  }
 }
 
 /* ═══════════ 左侧：导图列表 ═══════════ */

@@ -667,7 +667,9 @@ function isStickyFolderActive() {
    relayout 会用 max(默认值, 需要高度) 计算，比例一改必须清空旧缓存，
    否则分界线会被旧值锁住、改了也不动。 */
 const DIVIDER_RATIO_KEY = "glassCanvas.dividerRatio";
-const DIVIDER_RATIO_VERSION = "r0.18-0.12-tristage";
+/* 比例字符串一改，必须同步升级此版本标记，否则老用户的 localStorage 会
+   沿用旧的分界线位置，改比例就"不动"。历史版本：r0.18-0.12 → r0.22-0.14。 */
+const DIVIDER_RATIO_VERSION = "r0.22-0.14-tristage";
 try {
   if (localStorage.getItem(DIVIDER_RATIO_KEY) !== DIVIDER_RATIO_VERSION) {
     localStorage.setItem(DIVIDER_RATIO_KEY, DIVIDER_RATIO_VERSION);
@@ -675,10 +677,56 @@ try {
   }
 } catch {}
 
-const DONE_RATIO = 0.18;
-const REVIEW_RATIO = 0.12;
+const DONE_RATIO = 0.22;
+const REVIEW_RATIO = 0.14;
 const MIN_DONE_H = 44;
-const MIN_REVIEW_H = 40;
+const MIN_REVIEW_H = 120;
+
+/* 已完成区（done）分页展示：默认只显示最新 20 条，滚动到画布顶部（scrollTop ≈ 0）
+   或点击「⋯ 加载更多」时按 DONE_PAGE_STEP 追加。用户主动加载过的量按文件夹
+   持久化到 localStorage，避免下次进来把已经看过的又藏起来。 */
+const DONE_DEFAULT_VISIBLE = 20;
+const DONE_PAGE_STEP = 50;
+const DONE_VISIBLE_KEY = "glassCanvas.doneVisible";
+function getDoneVisible(fid) {
+  try {
+    const m = JSON.parse(localStorage.getItem(DONE_VISIBLE_KEY) || "{}");
+    const v = m && m[String(fid)];
+    return typeof v === "number" && v > 0 ? v : DONE_DEFAULT_VISIBLE;
+  } catch { return DONE_DEFAULT_VISIBLE; }
+}
+function setDoneVisible(fid, n) {
+  try {
+    const m = JSON.parse(localStorage.getItem(DONE_VISIBLE_KEY) || "{}");
+    m[String(fid)] = n;
+    localStorage.setItem(DONE_VISIBLE_KEY, JSON.stringify(m));
+  } catch {}
+}
+function loadMoreDone() {
+  if (!activeFolderId) return false;
+  const cur = getDoneVisible(activeFolderId);
+  const total = blocks.filter(b => b.stage === "done").length;
+  if (cur >= total) return false;
+  setDoneVisible(activeFolderId, Math.min(total, cur + DONE_PAGE_STEP));
+  relayout(false);
+  persistAllStackedPositions();
+  return true;
+}
+
+/* 「加载更多」胶囊点击：追加一批历史已完成。tailLimit 语义下新加载块插入段顶，
+   点击后把视口向上滚动让新加载的内容进入视野（用户接下来看到的是更老的记录）。 */
+document.getElementById("load-more-done")?.addEventListener("click", e => {
+  e.stopPropagation();
+  const beforeVisible = getDoneVisible(activeFolderId);
+  if (!loadMoreDone()) return;
+  const afterVisible = getDoneVisible(activeFolderId);
+  const added = afterVisible - beforeVisible;
+  if (added > 0) {
+    requestAnimationFrame(() => {
+      canvas.scrollTo({ top: Math.max(0, canvas.scrollTop - added * 44 + 14), behavior: "smooth" });
+    });
+  }
+});
 
 function defaultDoneY() {
   const h = canvas.clientHeight || window.innerHeight;
@@ -1441,16 +1489,23 @@ function encodePos(el, b) {
   else el.style.left = b.x + "px";
 }
 
-/* 堆叠区（done / review）通用布局：默认按创建时间从远到近排序（旧→新），
-   手动拖动后切到自由排序（按 y 位置）。
+/* 堆叠区（done / review）通用布局：
+   默认模式按 createdAt 升序（旧→新）：越老的排段顶，最新的排段底——
+     新完成的块自然落到段底，紧跟最近完成的历史。
+   手动模式（用户拖过堆叠块之后）按 y 位置排序，与视觉位置一致。
    insertB 为「刚拖入该区」的块：按 drop 时的 y 相对已有块的位置决定插入索引。
    stage: 'done' | 'review'
-   originY: 该段的顶部起点 y（done 段 = 14；review 段 = doneY + 16 之类） */
-function layoutStackedRows(stage, originY, insertB) {
+   originY: 该段的顶部起点 y（done 段 = 14；review 段 = doneY + 16 之类）
+   tailLimit: 可选，只保留排序后的最后 N 条（供 done 段分页展示：
+              默认显示"最新的 N 条"，早期历史通过滚动到顶 / 点「加载更多」再依次显示）。
+              insertB 不参与 tailLimit 截断：新完成的块永远会挤进可见列表。 */
+function layoutStackedRows(stage, originY, insertB, tailLimit) {
   const mode = getDoneSortMode();
-  const others = blocks.filter(b => b.stage === stage && b !== insertB).sort(
+  let all = blocks.filter(b => b.stage === stage && b !== insertB).sort(
     mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
   );
+  if (tailLimit != null && all.length > tailLimit) all = all.slice(all.length - tailLimit);
+  const others = all;
   let insertIdx = others.length;
   if (insertB) {
     const dropCenter = insertB.y;
@@ -1503,7 +1558,12 @@ function relayout(initial) {
   pendingInsert = null;
   pendingReviewInsert = null;
 
-  const doneRes = layoutStackedRows("done", 14, insertB);
+  /* done 段分页：只显示已加载数量的前 N 条（默认 20）。
+     注意：insertB 若在「被截掉的历史段」里则不会被堆叠，也不会计入高度，
+     这符合「用户还没加载就默认看不到老数据」的语义。 */
+  const doneTotal = blocks.filter(b => b.stage === "done").length;
+  const doneVisible = getDoneVisible(activeFolderId);
+  const doneRes = layoutStackedRows("done", 14, insertB, Math.min(doneVisible, doneTotal));
   const defDy = defaultDoneY();
   const dy = doneRes.list.length ? Math.max(defDy, 14 + doneRes.total + 46) : defDy;
 
@@ -1520,6 +1580,17 @@ function relayout(initial) {
     setDividerY(activeFolderId, dy, ry);
   }
   paintDivider();
+
+  /* 分页显示：把未进入 done 段展示的块从 DOM 里隐藏（display:none）。
+     保留 DOM 节点是为了保留事件监听器 / edit 状态，只显示/隐藏即可。 */
+  const shownDoneIds = new Set(doneRes.list.map(b => b.id));
+  for (const b of blocks) {
+    if (b.stage !== "done") continue;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el) continue;
+    const show = shownDoneIds.has(b.id);
+    el.style.display = show ? "" : "none";
+  }
 
   // 越界清理：分界线随内容下移后，原先紧贴 reviewY 下方摆放的待完成块会
   // 被「顶」进 review/done 区、被堆叠内容压住。
@@ -1538,17 +1609,40 @@ function relayout(initial) {
   const todo = blocks.filter(b => b.stage === "todo").length;
   const review = blocks.filter(b => b.stage === "review").length;
   const done = blocks.filter(b => b.stage === "done").length;
+  const doneHidden = Math.max(0, done - shownDoneIds.size);
   boardEmpty.hidden = blocks.length > 0;
   const doneHint = $("done-hint");
   if (doneHint) doneHint.hidden = !(blocks.length > 0 && done === 0 && review === 0);
   const pLabel = $("pending-label");
   if (pLabel) pLabel.innerHTML = `待完成 <b>${todo}</b>`;
   const topLabel = divider.querySelector(".label.top");
-  if (topLabel) topLabel.textContent = done ? `已完成 ${done}` : "已完成";
+  /* 「已完成 X / Y」—— 有历史被隐藏时明确告诉用户还藏了多少 */
+  if (topLabel) topLabel.textContent = done ? (doneHidden > 0 ? `已完成 ${doneVisible} / ${done}` : `已完成 ${done}`) : "已完成";
   const rLabelTop = reviewDivider && reviewDivider.querySelector(".label.top");
   if (rLabelTop) rLabelTop.textContent = review ? `待确认 ${review}` : "待确认";
   const rLabelBottom = reviewDivider && reviewDivider.querySelector(".label.bottom");
   if (rLabelBottom) rLabelBottom.innerHTML = `待完成 <b>${todo}</b>`;
+
+  /* 加载更多 chip：显示在「已加载的 done 段最后一行之下、分界线之上」的窄条位置，
+     点击后追加 DONE_PAGE_STEP 条历史。若无隐藏项则隐藏。 */
+  const loadMore = $("load-more-done");
+  if (loadMore) {
+    if (doneHidden > 0) {
+      // 定位到最后一条可见 done 块的底部 + 4px
+      let lastBottom = 14 + (doneVisible - 1) * 44 + 44; // 44 是默认块高估
+      for (const b of doneRes.list) {
+        const el = board.querySelector(`.block[data-id="${b.id}"]`);
+        if (el && b.y + el.offsetHeight > lastBottom) lastBottom = b.y + el.offsetHeight;
+      }
+      // 分界线在 dy 位置，chip 高度约 24，居中在 [lastBottom, dy] 之间
+      const chipTop = Math.min(lastBottom + 4, Math.max(6, dy - 28));
+      loadMore.hidden = false;
+      loadMore.style.top = chipTop + "px";
+      loadMore.textContent = `⋯ 加载更多（还有 ${doneHidden} 条已完成）`;
+    } else {
+      loadMore.hidden = true;
+    }
+  }
 
   // 画布高度：待完成块也纳入计算（否则滚到 reviewY 下方 200px 就触底）
   let maxY = ry + CANVAS_BOTTOM_PAD;
@@ -2082,6 +2176,28 @@ function startDrag(e, el, b) {
   /* 跨任务夹移动：记录本轮拖动中最后一次悬停在侧栏任务夹上的 li。
    * 用 elementFromPoint 探测，非 DnD；释放时若不为 null 就迁过去。 */
   let _sidebarDropTarget = null;
+  // 拖动落点提示：实时显示块松手后将落入哪个段，解决"拖不进待确认区"的视觉模糊
+  const zoneHint = $("drag-zone-hint");
+  let lastZoneCls = "";
+
+  function updateZoneHint(centerY) {
+    if (!zoneHint) return;
+    let zone, cls, text;
+    if (centerY < dY) { zone = "done"; cls = ""; text = "↓ 移到「已完成」"; }
+    else if (centerY < rY) { zone = "review"; cls = "to-review"; text = "↓ 移到「待确认」"; }
+    else { zone = "todo"; cls = "to-todo"; text = "↓ 移到「待完成」"; }
+    // 定位到块上方 28px；快到画布顶就放块下方
+    let top = curY - 28;
+    if (top < 6) top = curY + elH + 6;
+    zoneHint.style.top = top + "px";
+    zoneHint.textContent = text;
+    if (cls !== lastZoneCls) {
+      zoneHint.classList.remove("show", "to-review", "to-todo");
+      if (cls) zoneHint.classList.add(cls);
+      zoneHint.classList.add("show");
+      lastZoneCls = cls;
+    }
+  }
 
   function beginDrag() {
     started = true;
@@ -2104,9 +2220,13 @@ function startDrag(e, el, b) {
     lastGuideV = null; lastGuideH = null;
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
     el.classList.add("dragging");
-    canvasWrap.classList.add("is-dragging");
+    // canvasWrap 由 $("canvas-wrap") 取得，但 HTML 中 canvas-wrap 是 class 不是 id，
+    // 故该引用为 null；这里用 board 的最近祖先 .canvas-wrap 兜底（始终命中当前画布壳）
+    const wrap = canvasWrap || board.closest(".canvas-wrap");
+    if (wrap) wrap.classList.add("is-dragging");
     document.body.classList.add("is-dragging");
     document.body.style.cursor = "var(--cursor-grabbing)";
+    if (zoneHint) { zoneHint.hidden = false; updateZoneHint(startTop + elH / 2); }
   }
 
   function applyFrame() {
@@ -2115,7 +2235,10 @@ function startDrag(e, el, b) {
     const ev = latestEv;
     // 跨夹移动中：不更新块 transform，视觉由 cursor:grabbing 暗示
     // （探测逻辑已同步到 onMove，避免 raf 被取消导致最后一次探测丢失）
-    if (_sidebarDropTarget) return;
+    if (_sidebarDropTarget) {
+      if (zoneHint) zoneHint.classList.remove("show");
+      return;
+    }
     let nx = startLeft + (ev.clientX - originX);
     let ny = startTop + (ev.clientY - originY);
     // 拖动时不做网格磁吸（避免粘滞感），仅保留淡弱的边缘对齐
@@ -2136,6 +2259,24 @@ function startDrag(e, el, b) {
       if (snap.gy === null) { guideH.hidden = true; }
       else { guideH.hidden = false; guideH.style.top = snap.gy + "px"; }
     }
+    // 实时显示松手后将落入哪个段，让"拖到待确认区"有明确视觉反馈
+    updateZoneHint(curY + elH / 2);
+    // 画布边缘自动滚动：当指针接近画布顶/底边时，滚动画布让分界线跟随进入视野，
+    // 否则当 done 段被大量历史块撑大后 review 分界线会被推到画布下方几屏之外，
+    // 用户视觉上根本看不到 review 区，也就无法把块拖进去。
+    edgeAutoScroll(ev);
+  }
+
+  function edgeAutoScroll(ev) {
+    const cRect = canvas.getBoundingClientRect();
+    const EDGE = 60, STEP = 14;
+    const padTop = ev.clientY - cRect.top;
+    const padBottom = cRect.bottom - ev.clientY;
+    if (padTop < EDGE && canvas.scrollTop > 0) {
+      canvas.scrollTop = Math.max(0, canvas.scrollTop - STEP * (1 - padTop / EDGE));
+    } else if (padBottom < EDGE && canvas.scrollTop + canvas.clientHeight < canvas.scrollHeight) {
+      canvas.scrollTop = Math.min(canvas.scrollHeight, canvas.scrollTop + STEP * (1 - padBottom / EDGE));
+    }
   }
 
   const onMove = ev => {
@@ -2144,9 +2285,6 @@ function startDrag(e, el, b) {
       beginDrag();
     }
     // 同步探测侧栏 folder-item：不依赖 raf。
-    // 打包后 WebView2 里 raf 帧率较低，且 onUp 里 cancelAnimationFrame 会
-    // 取消最后一次 applyFrame——用户快速拖到侧栏立即松手时 _sidebarDropTarget
-    // 就漏写，handleCrossFolderDrop 分支进不去。改成同步探测避免这个 race。
     const hit = document.elementFromPoint(ev.clientX, ev.clientY);
     const li = hit && hit.closest ? hit.closest(".folder-item") : null;
     if (li !== _sidebarDropTarget) {
@@ -2155,7 +2293,7 @@ function startDrag(e, el, b) {
       _sidebarDropTarget = li;
     }
     latestEv = ev;
-    if (raf === null) raf = requestAnimationFrame(applyFrame);
+    applyFrame();
   };
 
   const onUp = upEv => {
@@ -2166,11 +2304,13 @@ function startDrag(e, el, b) {
     if (!started) return;
     try { el.releasePointerCapture(upEv.pointerId); } catch (_) {}
     el.classList.remove("dragging");
-    canvasWrap.classList.remove("is-dragging");
+    const wrap = canvasWrap || board.closest(".canvas-wrap");
+    if (wrap) wrap.classList.remove("is-dragging");
     document.body.classList.remove("is-dragging");
     el.style.transform = "";
     document.body.style.cursor = "";
     guideV.hidden = true; guideH.hidden = true;
+    if (zoneHint) { zoneHint.classList.remove("show"); zoneHint.hidden = true; }
     /* 跨任务夹迁移：松手时用 elementFromPoint 再探测一次目标夹。
      * 不依赖 _sidebarDropTarget——后者可能因为 raf 被 cancel 而漏写；
      * 这里兜底，只要松手时手指在某个 folder-item 上就迁过去。 */
@@ -2192,14 +2332,17 @@ function startDrag(e, el, b) {
     if (!moved) return;
     // 就地更新，不复建整块画布，避免释放时闪烁
     b.x = Math.round(curX); b.y = Math.round(curY);
-    // 三段判定（按块上沿的 y）：
-    //   b.y < dY  → done（越过分界线一即归入已完成）
-    //   b.y < rY  → review（位于两分界线之间）
-    //   otherwise → todo
+    // 三段判定（按块中心的 y）：
+    //   centerY < dY  → done
+    //   centerY < rY  → review
+    //   otherwise     → todo
+    // 用块中心而不是上沿，可以让整块视觉在 review 段内就算 review，
+    // 不会因为分界线正好压在块顶边就判定失败。
     const dyNow = dividerY(), ryNow = reviewY();
+    const centerY = b.y + (el.offsetHeight / 2);
     let newStage;
-    if (b.y < dyNow) newStage = "done";
-    else if (b.y < ryNow) newStage = "review";
+    if (centerY < dyNow) newStage = "done";
+    else if (centerY < ryNow) newStage = "review";
     else newStage = "todo";
     const oldStage = normalizeStage(b.stage);
     if (newStage !== oldStage) {
@@ -2510,6 +2653,23 @@ $("modal-ok").addEventListener("click", async () => {
 });
 nameInput.addEventListener("keydown", e => { if (e.key === "Enter") $("modal-ok").click(); });
 
+/* ---------- ALT 键：图片夹卡片右上角工具栏默认隐藏，按住 ALT 才显示 ---------- */
+// 与 body.show-card-actions 的"body class + 后代选择器控制 opacity"模式一致；
+// 这里用 body.alt-pressed 表达"当前按住 ALT"的全局状态。
+// 监听放顶层即可：图片夹模块(image-wall.js)与本模块同时被 index.html 引入，
+// 顺序无关——监听器只在 body 上加/移类，不会依赖别的模块的初始化。
+// 关键坑：ALT 在部分浏览器会触发 auto-repeat，需要 toggle 而非 add；
+// blur/visibilitychange 是兜底，避免窗口切换时 alt-pressed 残留。
+(function bindAltPressed() {
+  function setAlt(alt) { document.body.classList.toggle("alt-pressed", alt); }
+  document.addEventListener("keydown", e => { if (e.altKey) setAlt(true); });
+  document.addEventListener("keyup", e => { if (!e.altKey) setAlt(false); });
+  window.addEventListener("blur", () => setAlt(false));
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) setAlt(false);
+  });
+})();
+
 /* ---------- 设置 ---------- */
 const SETTINGS_KEY = "glassCanvas.settings";
 const settings = { cardActions: false };
@@ -2674,49 +2834,6 @@ $("update-auto").addEventListener("change", e => {
 fetchCurrentVersion().then(v => { $("app-version").textContent = "当前版本 v" + v; });
 $("app-version").addEventListener("click", () => checkForUpdates(false));
 
-/* ---------- 导出 / 导入 ---------- */
-$("export-btn").addEventListener("click", () => {
-  const data = {
-    folders: folders.map(f => ({ ...f, blocks: blocks.filter(b => b.folderId === f.id) })),
-    version: 1, exportedAt: new Date().toISOString(),
-  };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "玻光画布备份-" + new Date().toISOString().slice(0, 10) + ".json";
-  a.click(); URL.revokeObjectURL(a.href);
-});
-$("import-btn").addEventListener("click", () => $("import-file").click());
-$("import-file").addEventListener("change", async e => {
-  const file = e.target.files[0]; if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
-    try {
-      const data = JSON.parse(reader.result);
-      if (!data.folders) throw new Error("格式错误");
-      if (!confirm("导入将覆盖当前所有数据，确定继续？")) return;
-      // 先删除旧数据
-      for (const f of folders) await api.deleteFolder(f.id);
-      folders = []; blocks = [];
-      for (const f of data.folders) {
-        const nf = await api.createFolder(f.name);
-        if (f.dividerY) setDividerY(nf.id, f.dividerY);
-        const oldBlocks = f.blocks || [];
-        for (const b of oldBlocks) {
-          const nb = await api.createTask(nf.id, b.title || "", b.x || 16, b.y || 100);
-          const s = normalizeStage(b.stage);
-          if (s !== "todo") { await api.setStage(nb.id, s); nb.stage = s; nb.done = s === "done"; nb.row = true; }
-          blocks.push(nb);
-        }
-        folders.push({ ...nf, dividerY: getDividerY(nf.id) });
-      }
-      if (folders.length) activeFolderId = folders[0].id;
-      await reloadFolders(); await reloadTasks(); renderAll();
-    } catch (err) { alert("导入失败：" + err.message); }
-  };
-  reader.readAsText(file); e.target.value = "";
-});
-
 /* ---------- 完整备份 / 恢复 ----------
  * 桌面端把「SQLite 数据库 + images 图片目录 + localStorage 全部配置」打成一个 zip，
  * 拷贝到其他电脑后「从备份恢复」即可整体迁移。纯前端预览（无 Tauri）隐藏这两个入口。 */
@@ -2821,6 +2938,16 @@ function restoreScroll() {
 canvas.addEventListener("scroll", () => {
   clearTimeout(canvas._t);
   canvas._t = setTimeout(saveScroll, 200);
+  // 已完成区分页：滚到画布顶部时若还有历史隐藏，自动追加一批。
+  // tailLimit 语义下，追加的更老 done 块会插入到段顶；
+  // 保持 scrollTop 不变，让新加载的内容自然出现在视口顶部，符合"向上滚动加载更多"的直觉。
+  if (canvas.scrollTop < 40) {
+    const beforeTotal = blocks.filter(b => b.stage === "done").length;
+    const beforeVisible = getDoneVisible(activeFolderId);
+    if (beforeVisible < beforeTotal) {
+      loadMoreDone();
+    }
+  }
 });
 window.addEventListener("resize", () => renderAll());
 

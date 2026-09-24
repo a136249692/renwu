@@ -325,6 +325,32 @@ body.is-dragging .bg::after { opacity: 0; }
 .board-divider .label.bottom { top: 9px; right: 0; }
 .board-divider .label.bottom b { color: var(--accent); font-weight: 700; margin-left: 3px; }
 
+/* ---------- 已完成区「加载更多」胶囊 ---------- */
+.load-more-chip {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  padding: 5px 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--muted); background: rgba(255,255,255,0.92);
+  border: 1px solid rgba(28,31,38,0.10); border-radius: 20px;
+  backdrop-filter: blur(8px); box-shadow: var(--sh-xs);
+  cursor: pointer; z-index: 2; white-space: nowrap;
+  transition: color .15s, border-color .15s, transform .1s;
+}
+.load-more-chip:hover { color: var(--accent); border-color: rgba(28,31,38,0.22); }
+.load-more-chip:active { transform: translateX(-50%) scale(0.96); }
+
+/* ---------- 拖动落点提示 ---------- */
+.drag-zone-hint {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  padding: 6px 14px; font-size: 12px; font-weight: 700; letter-spacing: 0.05em;
+  color: #fff; background: var(--accent);
+  border-radius: 20px; box-shadow: 0 6px 20px rgba(0,113,227,0.35);
+  z-index: 12; pointer-events: none; white-space: nowrap;
+  opacity: 0; transition: opacity 0.15s, background 0.15s, transform 0.15s;
+}
+.drag-zone-hint.show { opacity: 1; }
+.drag-zone-hint.to-review { background: #e6a93a; box-shadow: 0 6px 20px rgba(240,185,58,0.35); }
+.drag-zone-hint.to-todo   { background: rgba(28,31,38,0.82); box-shadow: 0 6px 20px rgba(28,31,38,0.30); }
+
 /* ---------- 任务块 ---------- */
 .block {
   position: absolute; min-width: 180px; max-width: 510px;
@@ -1247,8 +1273,8 @@ mark {
   padding: 3px; border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0,0,0,0.10);
 }
-.img-card:hover .card-tools,
-.img-card.selected .card-tools { opacity: 1; }
+/* 默认隐藏；只有按住 ALT 键时才显示（用户明确要求，替代原 hover/selected 显示条件） */
+body.alt-pressed .img-card .card-tools { opacity: 1; }
 .tool-btn {
   border: none; background: transparent;
   width: 24px; height: 24px;
