@@ -1453,6 +1453,13 @@ mark {
   background: #fff; border-radius: 6px; padding: 2px 6px;
   box-shadow: 0 0 0 2px var(--accent), var(--sh-xs);
 }
+/* 任务夹名称内联重命名输入框（与 .map-rename-input 视觉一致） */
+.folder-rename-input {
+  flex: 1; min-width: 0; font: inherit; font-size: 13.5px; font-weight: 480;
+  color: var(--text-strong); border: none; outline: none;
+  background: #fff; border-radius: 6px; padding: 2px 6px;
+  box-shadow: 0 0 0 2px var(--accent), var(--sh-xs);
+}
 
 /* ═══ 合并提示 ═══ */
 .merge-hint {

@@ -512,7 +512,7 @@ function renderMapList() {
     });
     li.addEventListener("dblclick", e => {
       if (e.target.classList.contains("rm")) return;
-      startRenameMap(li, m);
+      startRenameMap(li, m, e);
     });
     li.querySelector(".rm").addEventListener("click", async e => {
       e.stopPropagation();
@@ -540,15 +540,37 @@ function renderMapList() {
     mapListEl.appendChild(li);
   }
 }
-function startRenameMap(li, m) {
+function startRenameMap(li, m, e) {
   const nameEl = li.querySelector(".name");
+  if (!nameEl) return;   // 双击命中了已存在的 input 或空元素时兜底
   const old = m.name;
   const input = document.createElement("input");
   input.value = old;
   input.className = "map-rename-input";
   input.maxLength = 30;
   nameEl.replaceWith(input);
-  input.select();
+  input.focus();
+  // 光标定位：优先用浏览器原生 caretRangeFromPoint（Chromium/Firefox 对 input
+  // 也支持，offset 直接就是字符下标），失败或 WebView 不支持时回退到
+  // 「按字符下标二分取最近 x」的通用做法；两者都失败就全选。
+  if (e && typeof e.clientX === "number" && typeof e.clientY === "number") {
+    const r = input.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right
+                 && e.clientY >= r.top  && e.clientY <= r.bottom;
+    let offset = null;
+    if (inside && typeof document.caretRangeFromPoint === "function") {
+      const caret = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (caret && caret.startContainer === input) offset = caret.startOffset;
+    }
+    if (offset == null && inside) offset = pickCaretOffset(input, e.clientX);
+    if (offset != null) input.setSelectionRange(offset, offset);
+    else input.select();
+  } else {
+    input.select();
+  }
+  // 阻止 li 的 pointerdown 拖拽处理器抢走 input 内的事件，保证用户能
+  // 用鼠标拖动选择文本、双击单词等浏览器原生行为
+  input.addEventListener("pointerdown", ev => ev.stopPropagation(), true);
   _renaming = true;
   let done = false;
   const commit = (save) => {
@@ -571,6 +593,25 @@ function startRenameMap(li, m) {
     if (e.key === "Enter") { e.preventDefault(); input.blur(); }
     else if (e.key === "Escape") { commit(false); }
   });
+}
+/* 在 <input> 里按 x 坐标找最接近的字符下标。
+   逐个下标用 Range.getBoundingClientRect() 采样光标位置，取与 x 距离最小的下标。
+   适用于单行 input；不依赖 caretRangeFromPoint，兼容性最好。 */
+function pickCaretOffset(input, x) {
+  const len = input.value.length;
+  let best = len, bestDist = Infinity;
+  const range = document.createRange();
+  for (let off = 0; off <= len; off++) {
+    try {
+      range.setStart(input, off);
+      range.setEnd(input, off);
+      const rect = range.getBoundingClientRect();
+      const cx = rect.left;
+      const d = Math.abs(cx - x);
+      if (d < bestDist) { bestDist = d; best = off; }
+    } catch (_) { break; }
+  }
+  return best;
 }
 /* 强制结束当前进行中的重命名（用于「新建导图」等会重建列表的操作前）。
    直接 blur 即可触发 commit → _renaming=false → 列表重建。 */
@@ -1337,52 +1378,72 @@ function selectNode(id) {
   }
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
 }
-/* 在纯文本的可编辑区里，按 (x,y) 坐标定位光标。
-   思路：在目标 text node 里对每个字符边界构造一个 collapsed range，
-   用 range.getBoundingClientRect() 拿到该「点」的 rect，再判断点击坐标
-   是否落在该点的矩形附近（±1px 容忍）。这样能正确处理多行换行——
-   每行的每个字符都有自己的 rect，不会因为点击第二行而算到第一行的字符数。
-   命中不了任何字符边界（比如点在空白 padding 上）返回 false，让调用方兜底。 */
-function caretAtXY(body, x, y) {
-  const sel = window.getSelection();
+/* 在纯文本的可编辑区里，按 (x,y) 坐标算出应该放光标的位置，返回一个 collapsed Range。
+   优先级：
+     1) 浏览器原生 document.caretRangeFromPoint（Chromium/Firefox）或
+        document.caretPositionFromPoint（WebKit）——内核自己知道字符边界在哪，
+        又快又准，还能处理 <br> 换行、多行布局等复杂情况。
+     2) 手工遍历 body 里的每个文本字符边界构造 Range，取 rect 匹配坐标——
+        兼容老内核，但慢一点、精度差一点。
+   找不到就返回 null，让调用方兜底（放到末尾或开头）。 */
+function caretRangeFromXY(body, x, y) {
+  // 1) 原生 API
+  if (typeof document.caretRangeFromPoint === "function") {
+    const r = document.caretRangeFromPoint(x, y);
+    if (r && body.contains(r.commonAncestorContainer)) return r;
+  } else if (typeof document.caretPositionFromPoint === "function") {
+    const p = document.caretPositionFromPoint(x, y);
+    if (p && p.offsetNode && body.contains(p.offsetNode)) {
+      const r = document.createRange();
+      r.setStart(p.offsetNode, p.offset);
+      r.collapse(true);
+      return r;
+    }
+  }
+  // 2) 兜底：遍历字符边界（保留旧逻辑，只改成返回 Range 而不直接 addRange）
   for (const child of body.childNodes) {
     if (child.nodeType !== 3) continue;
     const len = child.data.length;
     const range = document.createRange();
-    // 遍历 [0, len] 共 len+1 个字符边界；每个边界对应的矩形就是该处可停的光标位置。
     for (let idx = 0; idx <= len; idx++) {
       range.setStart(child, idx);
       range.collapse(true);
-      const r = range.getBoundingClientRect();
-      // 光标 rect 宽度常为 0，中心点即 r.left；容差 ±1px 处理亚像素偏差
-      const cx = r.width > 0 ? r.left + r.width / 2 : r.left;
-      if (x >= cx - 1 && x <= cx + 1 && y >= r.top - 1 && y <= r.bottom + 1) {
-        sel.removeAllRanges();
-        sel.addRange(range);
-        return true;
+      const rect = range.getBoundingClientRect();
+      const cx = rect.width > 0 ? rect.left + rect.width / 2 : rect.left;
+      if (x >= cx - 1 && x <= cx + 1 && y >= rect.top - 1 && y <= rect.bottom + 1) {
+        return range;
       }
     }
   }
-  return false;
+  return null;
 }
 function enterEdit(n, body, anchor) {
+  // 先算出目标光标位置：必须在 body 是 contenteditable=true 且文本已布局之后调用
+  // caretRangeFromXY，但 body.focus() 之前先算，因为 focus 会让浏览器把光标塞到
+  // 文本开头，覆盖我们要放的位置。
+  let targetRange = null;
+  body.setAttribute("contenteditable", "true");
+  if (anchor && typeof anchor.x === "number" && typeof anchor.y === "number") {
+    targetRange = caretRangeFromXY(body, anchor.x, anchor.y);
+  }
+  // 关键顺序：
+  //   1) focus() 让 body 成为焦点元素——如果之前有另一个节点 A 正在编辑，
+  //      这一步会同步触发 A.body 的 blur，进而跑 exitEdit(A)，其中会把
+  //      editingNode 置为 null。所以：
+  //   2) focus 之后再设一次 editingNode，防止被 A 的 exitEdit 冲掉
+  //   3) 最后再把选区 apply 到目标位置
+  body.focus();
   editingNode = n;
   selectedNodeId = n.id;
-  body.setAttribute("contenteditable", "true");
-  body.focus();
-  // 光标定位：双击/回车进入编辑时优先落在用户点击的位置（更符合直觉），
-  // 只在拿不到坐标或点在了文本外（比如空白 padding）时才退化为行首。
-  // 之前的实现是无脑 collapse(false) 把光标送到末尾，即使用户明明点在开头，
-  // 结果还得用方向键手动挪回——这就是「光标无法随意定位」的直接原因。
-  let placed = false;
-  if (anchor && typeof anchor.x === "number" && typeof anchor.y === "number") {
-    placed = caretAtXY(body, anchor.x, anchor.y);
-  }
-  if (!placed) {
+  const sel = window.getSelection();
+  if (targetRange) {
+    sel.removeAllRanges();
+    sel.addRange(targetRange);
+  } else {
+    // 没拿到点击坐标（键盘触发、或点在 padding 上）：退化为末尾，比开头更符合直觉
     const range = document.createRange();
     range.selectNodeContents(body);
-    range.collapse(true);
-    const sel = window.getSelection();
+    range.collapse(false);
     sel.removeAllRanges();
     sel.addRange(range);
   }
@@ -1420,6 +1481,16 @@ function insertBreakAtCaret(body) {
 }
 async function exitEdit(n, body) {
   body.setAttribute("contenteditable", "false");
+  // 防御：如果调用时焦点已经在别的 body 上了（例如 A 的 blur 在 B 已经
+  // focus 之后才异步派发，或某个外部 UI 抢先抢走了焦点），
+  // 说明这次 exit 是「迟到的退出」，不该再动全局 editingNode / 也不该
+  // 读 innerText 落盘——B 那边会负责自己的落盘。只把 A.body 的
+  // contenteditable 关掉就行。
+  const active = document.activeElement;
+  if (active && active !== body && body.contains(active) === false
+      && active.closest && active.closest(".mind-node-body")) {
+    return;
+  }
   editingNode = null;
   // innerText 会把 <br> 转成 \n、把 <div> 之间的分隔转成 \n，比 textContent 更贴近
   // "用户在多行文本框里看到的内容"；同时把 Windows 上可能出现的 \r\n 归一成 \n。

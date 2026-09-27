@@ -960,7 +960,7 @@ function renderFolders() {
     }
     li.addEventListener("dblclick", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
-      openModal("rename", f);
+      startFolderRename(li, f, e);
     });
     // 拖动排序：只有非速记夹可以拖动（作为拖源）。
     // 用 pointerdown+pointermove+pointerup 实现，不用 HTML5 DnD——后者在打包后
@@ -1100,6 +1100,100 @@ function reorderFolders(srcId, targetId) {
   renderFolders();
 }
 
+let _folderRenaming = false;   // 内联重命名期间：阻止 pointerdown 触发拖拽
+function finalizeFolderRename() { _folderRenaming = false; }
+/* 任务夹内联重命名：新建任务夹、双击任务夹改名都走这里。
+   与思维夹 startRenameMap 保持一致的交互体验：
+     · 立即把 .name 换成 <input>，无需弹窗
+     · 光标定位到用户点击的字符位置（不是默认全选）
+     · Enter 提交、Esc 取消、blur 提交
+     · 提交后局部更新 folders[] 与 DOM 文字，不全量 renderFolders
+       以避免拖动/焦点被意外打断 */
+function startFolderRename(li, f, e) {
+  if (_folderRenaming) return;
+  const nameEl = li.querySelector(".name");
+  if (!nameEl) return;
+  const old = f.name;
+  const input = document.createElement("input");
+  input.value = old;
+  input.className = "folder-rename-input";
+  input.maxLength = 30;
+  nameEl.replaceWith(input);
+  input.focus();
+  // 光标定位：优先用浏览器原生 caretRangeFromPoint，失败或坐标不在
+  // input 内就退化为按字符下标二分取最近 x，两者都失败再全选
+  if (e && typeof e.clientX === "number" && typeof e.clientY === "number") {
+    const r = input.getBoundingClientRect();
+    const inside = e.clientX >= r.left && e.clientX <= r.right
+                 && e.clientY >= r.top  && e.clientY <= r.bottom;
+    let offset = null;
+    if (inside && typeof document.caretRangeFromPoint === "function") {
+      const caret = document.caretRangeFromPoint(e.clientX, e.clientY);
+      if (caret && caret.startContainer === input) offset = caret.startOffset;
+    }
+    if (offset == null && inside) offset = pickInputCaretOffset(input, e.clientX);
+    if (offset != null) input.setSelectionRange(offset, offset);
+    else input.select();
+  } else {
+    input.select();
+  }
+  // 阻止 li 的 pointerdown 拖拽处理器抢走事件
+  input.addEventListener("pointerdown", ev => ev.stopPropagation(), true);
+  _folderRenaming = true;
+  let done = false;
+  const commit = (save) => {
+    if (done) return; done = true;
+    _folderRenaming = false;
+    const val = (input.value || "").trim() || old;
+    if (save && val !== old) {
+      api.renameFolder(f.id, val).then(async () => {
+        f.name = val;
+        // 与思维夹一致：局部更新 DOM 文字，不全量重绘（避免拖动/焦点被意外打断）
+        const nEl = input.parentElement.querySelector(".name");
+        if (nEl) {
+          nEl.textContent = val;
+          // 若重命名的就是当前激活的任务夹，同步顶部标题
+          if (f.id === activeFolderId) {
+            folderTitle.textContent = val;
+            if (isStickyFolderActive()) folderTitleSticky.textContent = val;
+          }
+        } else {
+          renderFolders();
+        }
+      });
+    } else {
+      const n = document.createElement("span");
+      n.className = "name";
+      n.textContent = old;
+      input.replaceWith(n);
+    }
+  };
+  input.addEventListener("blur", () => commit(true));
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); input.blur(); }
+    else if (e.key === "Escape") { commit(false); }
+  });
+}
+/* 在 <input> 里按 x 坐标找最接近的字符下标。
+   逐个下标用 Range.getBoundingClientRect() 采样光标位置，取与 x 距离最小的下标。
+   适用于单行 input；不依赖 caretRangeFromPoint，兼容性最好。 */
+function pickInputCaretOffset(input, x) {
+  const len = input.value.length;
+  let best = len, bestDist = Infinity;
+  const range = document.createRange();
+  for (let off = 0; off <= len; off++) {
+    try {
+      range.setStart(input, off);
+      range.setEnd(input, off);
+      const rect = range.getBoundingClientRect();
+      const cx = rect.left;
+      const d = Math.abs(cx - x);
+      if (d < bestDist) { bestDist = d; best = off; }
+    } catch (_) { break; }
+  }
+  return best;
+}
+
 /* 任务夹 pointer 排序：用 pointerdown+setPointerCapture+window pointermove/pointerup，
    替代 HTML5 DnD。HTML5 DnD 在 WebView2 打包后侧栏 li 作为拖源不稳定；
    pointer 模式跟普通块 startDrag 一致，跨夹移动那块也证明它在 WebView2 里稳定。
@@ -1110,6 +1204,7 @@ function reorderFolders(srcId, targetId) {
    - 松手时按当前 hover 目标调用 reorderFolders(srcId, targetId, before?)。 */
 function startFolderPointerDrag(e, srcId, srcEl) {
   if (_foldDragSrc != null) return;
+  if (_folderRenaming) return;
   e.preventDefault();
   const startX = e.clientX, startY = e.clientY;
   const startElt = e.target;
@@ -2706,7 +2801,15 @@ function openModal(mode, folder) {
   modal.hidden = false; setTimeout(() => nameInput.focus(), 30);
 }
 function closeModal() { modal.hidden = true; }
-$("new-folder-btn").addEventListener("click", () => openModal("create"));
+$("new-folder-btn").addEventListener("click", async () => {
+  // 与思维夹「新建导图」一致：直接创建 + 立刻内联改名，不再弹对话框
+  const f = await api.createFolder("");
+  folders.push(f);
+  activeFolderId = f.id;
+  renderFolders();
+  const li = folderListEl.querySelector(`.folder-item[data-id="${f.id}"]`);
+  if (li) startFolderRename(li, f);
+});
 $("modal-cancel").addEventListener("click", closeModal);
 modal.addEventListener("click", e => { if (e.target === modal) closeModal(); });
 $("modal-ok").addEventListener("click", async () => {

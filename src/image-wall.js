@@ -367,8 +367,12 @@ function fitView() {
   applyView(); saveViewSoon();
 }
 
-/* ---------- 卡片渲染 ---------- */
+/* ---------- 卡片渲染 ----------
+   新插入图片按「等比缩放到最长边 DISPLAY_MAX」显示，避免 4000x3000 的原图
+   直接把卡片撑成屏幕 3 倍大；用户仍可拖角/右键缩放，原图分辨率不动。 */
 const CARD_DEFAULT_W = 220;
+const DISPLAY_MAX = 480;   // 新插入卡片最长边上限
+const DISPLAY_MIN = 160;   // 新插入卡片最短边下限（避免极小图缩到看不见）
 function renderItems() {
   if (!imageWorld) return;
   const seen = new Set();
@@ -1293,13 +1297,22 @@ async function uploadFile(file) {
     const r = imageCanvas.getBoundingClientRect();
     const cx = (r.width / 2 - view.x) / view.zoom;
     const cy = (r.height / 2 - view.y) / view.zoom;
-    // 粘贴/上传的图片默认按「原图完整长宽」展示，不再限制到 480px：
-    //   · 旧逻辑 Math.min(dim.w, 480) 会把大尺寸图缩到 480，用户看不到完整宽高。
-    //   · 现在直接采用原图宽高，card 的 aspect-ratio 与图片一致，
-    //     .card-img 的 object-fit:cover 就不会裁切，用户第一眼就能看到全图。
-    //   · 尺寸上限仍由 30MB 体积校验保证不至于过大。
-    const w = dim.w && dim.w > 0 ? dim.w : CARD_DEFAULT_W;
-    const h = dim.h && dim.h > 0 ? dim.h : w;
+    // 新插入卡片按「等比缩放到最长边 DISPLAY_MAX(480)」显示：
+    //   · 保留原图宽高比：w/h 同除一个 scale，绝不出现拉伸或裁切
+    //   · 大尺寸原图不再把卡片撑得比屏幕还大（4000x3000 → 480x360）
+    //   · 极小图缩到最短边 DISPLAY_MIN(160)，避免缩到看不见
+    //   · 原图分辨率不动，用户仍可拖角/右键自由缩放
+    const iw = dim.w && dim.w > 0 ? dim.w : CARD_DEFAULT_W;
+    const ih = dim.h && dim.h > 0 ? dim.h : iw;
+    let w = iw, h = ih;
+    if (Math.max(w, h) > DISPLAY_MAX) {
+      const s = DISPLAY_MAX / Math.max(w, h);
+      w = Math.round(w * s); h = Math.round(h * s);
+    }
+    if (Math.min(w, h) < DISPLAY_MIN) {
+      const s = DISPLAY_MIN / Math.min(w, h);
+      w = Math.round(w * s); h = Math.round(h * s);
+    }
     it.x = cx - w / 2;
     it.y = cy - h / 2;
     it.width = w;
