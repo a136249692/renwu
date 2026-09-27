@@ -257,8 +257,23 @@ function setMode(m) {
   // 可能还没就绪（浏览器尚未完成 reflow），此时 relayout 会用 0 尺寸算分界线、
   // 把堆叠块挤到画布顶部 → 视觉上"内容块错乱"。用双 rAF：第一帧触发 reflow，
   // 第二帧 clientHeight 已正确，再 renderAll + relayout 重算分界线位置。
+  //
+  // ⚠ renderAll 是 main.js 的模块私有函数，必须通过 window 钩子访问
+  //    （main.js 末尾已挂 window.renderAll / window.__alignPendingBlocks 等）。
+  //    旧代码在模块作用域下引用未暴露的全局符号会永远为 undefined，
+  //    导致切回任务 tab 时布局从不重算 → todo 区内容块堆积/重叠。
   if (m === "tasks") {
-    requestAnimationFrame(() => requestAnimationFrame(() => { renderAll && renderAll(); }));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (typeof window.renderAll === "function") window.renderAll();
+      // 若用户开启了「靠左对齐」且当前不是便利贴夹，切回后再对齐一次，
+      // 保证对齐偏好在跨 tab 往返后仍生效（relayout 本身不强制重新对齐）。
+      const tg = window.__getAlignToggle && window.__getAlignToggle();
+      const alignOn = tg && tg.checked;
+      const sticky = window.__isStickyFolderActive && window.__isStickyFolderActive();
+      if (alignOn && !sticky && typeof window.__alignPendingBlocks === "function") {
+        window.__alignPendingBlocks([]);
+      }
+    }));
   }
 }
 

@@ -778,6 +778,11 @@ function alignPendingBlocks(appendIds) {
     return el ? !el.classList.contains("zoomed") : true;
   });
   if (!pending.length) return;
+  /* 防御：pane 处于 display:none（其它 tab 激活）时 offsetHeight 全为 0，
+     会导致所有块堆在同一 y。检测到真实高度为 0 时直接跳过本次对齐，
+     等 pane 重新可见后由下一次对齐调用重排即可。 */
+  const probeEl = board.querySelector(`.block[data-id="${pending[0].id}"]`);
+  if (probeEl && probeEl.offsetHeight === 0 && board.clientHeight === 0) return;
   if (Object.keys(savedPositions).length === 0) {
     savedPositions = {};
     pending.forEach(b => { savedPositions[b.id] = { x: b.x, y: b.y }; });
@@ -1500,6 +1505,14 @@ function encodePos(el, b) {
               默认显示"最新的 N 条"，早期历史通过滚动到顶 / 点「加载更多」再依次显示）。
               insertB 不参与 tailLimit 截断：新完成的块永远会挤进可见列表。 */
 function layoutStackedRows(stage, originY, insertB, tailLimit) {
+  /* 防御：画布/pane 处于 display:none（例如用户正停留在导图/图片 tab）时，
+     offsetHeight 全部返回 0。若此时仍按 0 累积 cursor，所有块会堆在同一 y，
+     切回任务 tab 时视觉上「内容块重叠」。检测到底层块高度为 0 时提前退出，
+     由调用方（renderAll / setMode）在下一次布局真正就绪时重跑。 */
+  const probeEl = board.querySelector(".block");
+  if (probeEl && probeEl.offsetHeight === 0 && board.clientHeight === 0) {
+    return { list: [], total: 0, deferred: true };
+  }
   const mode = getDoneSortMode();
   let all = blocks.filter(b => b.stage === stage && b !== insertB).sort(
     mode === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt
@@ -3265,3 +3278,12 @@ async function boot() {
   window.addEventListener("beforeunload", saveScroll);
 }
 boot();
+
+/* 挂载到 window，供其它 ES 模块（mindmap.js 等）在跨模块场景调用。
+   renderAll 是模块私有函数——ES module 里顶层 function 不会挂到全局。
+   mindmap.js 的 setMode 依赖此钩子在「切回任务 tab」时触发 relayout，
+   否则双 rAF 后的布局重算永远走不到，导致 todo 区内容块堆积/重叠。 */
+window.renderAll = renderAll;
+window.__alignPendingBlocks = alignPendingBlocks;
+window.__getAlignToggle = () => alignToggle;
+window.__isStickyFolderActive = () => isStickyFolderActive();
