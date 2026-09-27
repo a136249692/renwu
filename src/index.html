@@ -107,6 +107,8 @@
               <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · 节点内 <kbd>＋ 图片</kbd> 加图（可多张）· 选中节点后 <kbd>Ctrl/⌘+V</kbd> 粘贴图片 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
             </div>
             <div class="mind-toolbar" id="mind-toolbar" hidden>
+              <button id="mind-copy-block"  title="复制选中的思维块（Ctrl+Shift+C，含文本与图片）" hidden>📋 复制思维块</button>
+              <button id="mind-paste-block" title="粘贴思维块到画布中心（Ctrl+Shift+V）" hidden>📥 粘贴思维块</button>
               <button id="mind-zoom-out" title="缩小">−</button>
               <span id="mind-zoom-label">100%</span>
               <button id="mind-zoom-in" title="放大">＋</button>
@@ -138,9 +140,10 @@
             <div class="mind-toolbar" id="image-toolbar" hidden>
               <button id="image-add" title="上传图片">＋ 上传</button>
               <span class="tb-sep" aria-hidden="true"></span>
-              <button id="image-copy"  title="复制选中的图片到剪贴板（Ctrl+C）" hidden>📋 复制</button>
-              <button id="image-cut"   title="剪切选中的图片（Ctrl+X，原夹移除）" hidden>✂️ 剪切</button>
-              <button id="image-paste" title="粘贴到当前图片夹（Ctrl+V）" hidden>📥 粘贴</button>
+              <button id="image-copy"       title="复制选中的图片到剪贴板（Ctrl+C，含描述文字）" hidden>📋 复制</button>
+              <button id="image-copy-only"  title="仅复制图片本身（Ctrl+Shift+C，不含描述文字）" hidden>🖼 仅复制图片</button>
+              <button id="image-cut"        title="剪切选中的图片（Ctrl+X，原夹移除）" hidden>✂️ 剪切</button>
+              <button id="image-paste"      title="粘贴到当前图片夹（Ctrl+V）" hidden>📥 粘贴</button>
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="image-combine" title="组合选中图片（Ctrl+M）：合成一张新 PNG" hidden style="display:none">⧉ 组合</button>
               <button id="image-uncombine" title="选中一张组合图片后可拆分（Ctrl+Z）" hidden style="display:none">↩ 拆分</button>
@@ -245,10 +248,14 @@
       </div>
     </div>
 
-    <!-- 更新弹窗 -->
+    <!-- 更新弹窗：非模态浮窗，可拖动 / 最小化为角落小徽章，不遮挡主程序操作 -->
     <div class="modal-overlay" id="update-modal" hidden>
       <div class="modal modal-update">
-        <h3>发现新版本 <span id="update-version">v1.0.0</span></h3>
+        <div class="update-title-row">
+          <h3>发现新版本 <span id="update-version">v1.0.0</span></h3>
+          <button id="update-minimize" class="update-minimize-btn" title="最小化到角落，不遮挡操作">—</button>
+        </div>
+        <div class="modal-update-body">
         <div class="update-notes" id="update-notes">（此版本没有更新说明）</div>
         <!-- 首次下载的信任警告前置说明：浏览器会拦截，Windows SmartScreen 也会拦。
              两者都不是病毒警告，操作路径提前写清，避免用户放弃安装。
@@ -271,7 +278,18 @@
           <button id="update-cancel">取消</button>
           <button class="primary" id="update-install">下载并安装</button>
         </div>
+        </div>
       </div>
+    </div>
+
+    <!-- 更新最小化徽章：更新弹窗被最小化后显示，点击展开 -->
+    <div id="update-pill" class="update-pill" hidden>
+      <span class="update-pill-icon">🔄</span>
+      <span class="update-pill-text">
+        <span class="update-pill-title">发现新版本</span>
+        <span class="update-pill-version" id="update-pill-version">v1.0.0</span>
+      </span>
+      <span class="update-pill-hint">点击展开</span>
     </div>
 
     <!-- 思维节点图片灯箱：点击图片后全屏缩放查看 -->

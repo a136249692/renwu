@@ -173,6 +173,7 @@ const imageZoomLabel  = $("image-zoom-label");
 const imageFitBtn     = $("image-fit");
 const imageFileInput  = $("image-file-input");
 const imageCopyBtn    = $("image-copy");
+const imageCopyOnlyBtn= $("image-copy-only");
 const imageCutBtn     = $("image-cut");
 const imagePasteBtn   = $("image-paste");
 
@@ -827,6 +828,38 @@ async function cutSelection() {
   syncImageToolbarBtns();
   toast(`已剪切 ${snap.items.length} 张（含描述文字）——去目标夹按 Ctrl+V`);
 }
+/* 仅复制图片本身：不含描述文字。图片字节读入后同时发布到
+   _clipboard（不含标题）和共享剪贴板（title 为空），并尝试写入系统剪贴板
+   （Ctrl+V 到其它应用可直接粘图）。适用场景：用户只想把图带走、不要标题。 */
+async function copyImageOnly() {
+  if (!activeFolder || selection.size === 0) { toast("请先选中至少 1 张图片"); return; }
+  const snap = await snapshotSelection("copy");
+  if (!snap) { toast("复制失败：无法读取图片数据"); return; }
+  // 清掉每张的描述文字——这就是"仅复制图片"的语义
+  const cleanItems = snap.items.map(s => ({ ...s, title: "" }));
+  const cleanSnap = { ...snap, items: cleanItems };
+  _clipboard = cleanSnap;
+  publishSharedClip(cleanSnap);
+  await writeImagesToSystemClipboard(cleanItems);
+  syncImageToolbarBtns();
+  toast(`已仅复制 ${cleanItems.length} 张图片（不含描述）—— Ctrl+V 粘贴到任意思维块/其它应用`, 3600);
+}
+/* 把图片字节写入系统剪贴板（Ctrl+V 到其它应用时直接拿到图）。
+   单张：写一张；多张：只写第一张（浏览器 ClipboardItem 不支持多张 image）。
+   与思维块一致：走 navigator.clipboard.write，失败仅告警、不阻塞内部剪贴板。 */
+async function writeImagesToSystemClipboard(items) {
+  const cb = typeof navigator !== "undefined" ? navigator.clipboard : null;
+  if (!cb || typeof cb.write !== "function" || !items || !items.length) return;
+  try {
+    const types = {};
+    for (const s of items) {
+      if (!s || !s.bytes || !s.bytes.length) continue;
+      const mime = guessMime(s.file_name || "clip.png");
+      if (!types[mime]) types[mime] = new Blob([s.bytes], { type: mime });
+    }
+    if (Object.keys(types).length) await cb.write([new ClipboardItem(types)]);
+  } catch (e) { console.warn("[图片墙] 写入系统剪贴板图片失败:", e); }
+}
 async function pasteClipboard() {
   if (!_clipboard || !_clipboard.items.length) {
     toast("剪贴板为空：请先在任意图片夹里 Ctrl+C 复制或 Ctrl+X 剪切");
@@ -908,8 +941,9 @@ async function consumeCutSources(snaps) {
 }
 /* 按钮显隐：copy/cut 需 selection≥1；paste 需剪贴板非空且当前夹存在 */
 function syncClipboardBtns() {
-  if (imageCopyBtn) imageCopyBtn.hidden = !activeFolder || selection.size === 0;
-  if (imageCutBtn)  imageCutBtn.hidden  = !activeFolder || selection.size === 0;
+  if (imageCopyBtn)     imageCopyBtn.hidden = !activeFolder || selection.size === 0;
+  if (imageCopyOnlyBtn) imageCopyOnlyBtn.hidden = !activeFolder || selection.size === 0;
+  if (imageCutBtn)      imageCutBtn.hidden  = !activeFolder || selection.size === 0;
   if (imagePasteBtn) {
     imagePasteBtn.hidden = !_clipboard || !_clipboard.items.length || !activeFolder;
     if (!_clipboard || !_clipboard.items.length) imagePasteBtn.title = "粘贴到当前图片夹（Ctrl+V）";
@@ -1692,6 +1726,7 @@ function bindToolbar() {
     imageFileInput.click();
   });
   if (imageCopyBtn)  imageCopyBtn.addEventListener("click", () => copySelection());
+  if (imageCopyOnlyBtn) imageCopyOnlyBtn.addEventListener("click", () => copyImageOnly());
   if (imageCutBtn)   imageCutBtn.addEventListener("click",  () => cutSelection());
   if (imagePasteBtn) imagePasteBtn.addEventListener("click", () => pasteClipboard());
   if (imageZoomInBtn) imageZoomInBtn.addEventListener("click", () => {
@@ -1747,6 +1782,17 @@ function bindKeyboard() {
       e.preventDefault();
       toast("组合功能已下线", 2000);
       return;
+    }
+    // Ctrl+Shift+C：仅复制图片本身（不含描述文字）
+    // 图片夹和思维块互斥（同时间只有一个 Pane 可见），因此思维块的
+    // Ctrl+Shift+C（复制思维块）在这里不会冲突。
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey &&
+        (e.key === "c" || e.key === "C")) {
+      if (selection.size > 0) {
+        e.preventDefault();
+        copyImageOnly();
+        return;
+      }
     }
     // Ctrl+Z / Cmd+Z：拆分功能已下线（UI 隐藏），快捷键也不再触发
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&

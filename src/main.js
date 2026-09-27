@@ -2600,8 +2600,14 @@ function removeBlock(id) {
 async function removeFolder(id) {
   const f = folders.find(x => x.id === id);
   if (!f) return;
-  if (isStickyFolder(f)) { alert("速记夹不可删除"); return; }
-  if (!confirm(`确定删除任务夹「${f.name}」及其全部任务？`)) return;
+  if (isStickyFolder(f)) { toast("速记夹不可删除", 2000); return; }
+  // 原生 confirm 在部分宿主 WebView 支持不完整，改用应用内确认弹窗，
+  // 复用 mindmap.js / image-wall.js 里定义的同一 confirm-modal DOM。
+  const confirmed = await _askConfirmInline(
+    `<b>确定删除任务夹「${f.name}」？</b><br>夹内全部任务会一并删除，此操作无法撤销。`,
+    { title: "删除任务夹", okText: "确认删除" }
+  );
+  if (!confirmed) return;
   await api.deleteFolder(id);
   folders = folders.filter(x => x.id !== id);
   blocks = blocks.filter(b => b.folderId !== id);
@@ -2616,6 +2622,27 @@ async function removeFolder(id) {
   saveFolderOrderMap(orderMap);
   await reloadTasks();
   renderAll();
+}
+
+/* 内联的 confirm 弹窗实现：与 mindmap.js / image-wall.js 里的 askConfirm 语义一致，
+   复用同一个 #confirm-modal DOM。这里独立定义是为了：
+     1) 任务页在 mindmap.js 尚未执行完时也能弹窗（不依赖全局 askConfirm）；
+     2) 任务页有自己的 resolve 生命周期，与思维块 / 图片夹互不干扰。
+   三个模块共用同一 DOM，但同一时间只会有一个是「当前询问者」，所以不冲突。 */
+function _askConfirmInline(message, opts) {
+  const o = opts || {};
+  return new Promise(resolve => {
+    const modalEl = $("confirm-modal");
+    if (!modalEl) { // 极端兜底：DOM 不存在则退化为 window.confirm
+      return resolve(window.confirm(message.replace(/<[^>]+>/g, "")));
+    }
+    $("confirm-title").textContent = o.title || "确认操作";
+    $("confirm-msg").innerHTML = message;
+    $("confirm-ok").textContent = o.okText || "确认";
+    // 用 window 挂 resolve，让 mindmap.js 的 closeConfirm 也能 resolve 本弹窗
+    window.__confirmResolve = resolve;
+    modalEl.hidden = false;
+  });
 }
 
 /* ---------- 保存提示 ---------- */
@@ -2786,20 +2813,29 @@ async function fetchCurrentVersion() {
     return await getVersion();
   } catch { return updateVersion(); }
 }
-/* 打开更新弹窗，传 update 对象。update.body 是 GitHub Release body（Markdown） */
+/* 打开更新弹窗，传 update 对象。update.body 是 GitHub Release body（Markdown）。
+   弹窗改为非模态：主程序可以正常操作，通过右上角「—」最小化为右下角小徽章，
+   点击徽章展开，不遮挡任何操作。 */
 function openUpdateModal(update, onProgress) {
   const m = $("update-modal");
+  const modal = m.querySelector(".modal-update");
   $("update-version").textContent = update.version;
   $("update-notes").textContent = update.body || "（此版本没有更新说明）";
   $("update-progress").classList.remove("show");
   $("update-cancel").hidden = false;
   $("update-install").hidden = false;
+  $("update-install").disabled = false;
+  $("update-cancel").disabled = false;
   $("update-install").textContent = "下载并安装";
+  // 每次打开都重置位置到默认（右上角）——上次最小化后再检查更新不会留在奇怪的地方
+  resetUpdateModalPosition();
   // SmartScreen 说明不再显示：以前因为没买代码签名证书会弹这条提示，现在改走
   // CNB 直链 + 已签名发布资产，不再需要 UI 层解释。DOM 保留以便回滚。
   const ss = $("update-smartscreen");
   if (ss) ss.hidden = true;
+  // 展开更新弹窗，同时把最小化徽章隐藏
   m.hidden = false;
+  hideUpdatePill();
   // 下载进度回调：onEvent({event:'Started'|'Progress'|'Finished', data:{contentLength?|chunkLength}})
   let total = 0, done = 0;
   onProgress = onProgress || (e => {
@@ -2807,16 +2843,25 @@ function openUpdateModal(update, onProgress) {
       total = e.data.contentLength || 0;
       $("update-progress").classList.add("show");
       $("update-bar").style.width = "0%";
+      modal.classList.add("downloading");
+      // 如果此刻徽章正显示（下载过程中用户最小化了），也让徽章进入下载态
+      if (!$("update-pill").hidden) $("update-pill").classList.add("downloading");
     } else if (e.event === "Progress") {
       done += e.data.chunkLength;
-      if (total > 0) $("update-bar").style.width = Math.min(100, done * 100 / total) + "%";
-      else $("update-bar").style.width = "100%";
+      const pct = total > 0 ? Math.min(100, done * 100 / total) : 100;
+      $("update-bar").style.width = pct + "%";
+      // 同步更新徽章下方细进度条
+      if (!$("update-pill").hidden) {
+        $("update-pill").style.setProperty("--update-pill-progress", (pct / 100).toFixed(3));
+      }
     }
   });
   $("update-install").onclick = async () => {
     $("update-install").disabled = true;
     $("update-cancel").disabled = true;
     $("update-progress").classList.add("show");
+    modal.classList.add("downloading");
+    if (!$("update-pill").hidden) $("update-pill").classList.add("downloading");
     try {
       await update.downloadAndInstall(onProgress);
       // Windows 上 install 会自动启动安装器并退出应用，这里走不到
@@ -2830,16 +2875,115 @@ function openUpdateModal(update, onProgress) {
       $("update-install").disabled = false;
       $("update-cancel").disabled = false;
       $("update-progress").classList.remove("show");
+      modal.classList.remove("downloading");
+      if (!$("update-pill").hidden) $("update-pill").classList.remove("downloading");
     }
   };
 }
-function closeUpdateModal() { $("update-modal").hidden = true; }
+/* 关闭更新弹窗（同时把最小化徽章也收起来） */
+function closeUpdateModal() {
+  $("update-modal").hidden = true;
+  hideUpdatePill();
+}
+/* 最小化更新弹窗：隐藏弹窗，右下角显示一个小徽章，不遮挡操作 */
+function minimizeUpdateModal() {
+  if ($("update-modal").hidden) return;
+  $("update-modal").hidden = true;
+  const pill = $("update-pill");
+  // 把版本号和下载状态同步到徽章
+  $("update-pill-version").textContent = $("update-version").textContent || "";
+  const modal = $("update-modal").querySelector(".modal-update");
+  pill.classList.toggle("downloading", !!modal && modal.classList.contains("downloading"));
+  pill.hidden = false;
+}
+function restoreUpdateModal() {
+  if ($("update-modal").hidden === false) return;
+  $("update-modal").hidden = false;
+  hideUpdatePill();
+}
+function hideUpdatePill() {
+  const pill = $("update-pill");
+  pill.hidden = true;
+  pill.classList.remove("downloading");
+  pill.style.removeProperty("--update-pill-progress");
+}
+/* 弹窗位置复位：让 modal 回到默认（视口右上区域）。
+   拖动结束后位置持久化在 localStorage，用户下次打开仍留在那。 */
+function resetUpdateModalPosition() {
+  const m = $("update-modal");
+  const modal = m.querySelector(".modal-update");
+  // 清掉所有内联 left/top/transform，回退到 CSS 默认（left:50% top:84px translateX(-50%)）
+  modal.style.left = "";
+  modal.style.top = "";
+  modal.style.right = "";
+  modal.style.bottom = "";
+  modal.style.transform = "";
+}
+
+/* 弹窗拖动：拖标题栏。位置记录为 {left, top}，视口内自动夹取，窗口缩放时不再越界。 */
+function bindUpdateModalDrag() {
+  const m = $("update-modal");
+  const modal = m.querySelector(".modal-update");
+  const titleRow = m.querySelector(".update-title-row");
+  if (!modal || !titleRow) return;
+  let dragging = false;
+  let startX = 0, startY = 0, origL = 0, origT = 0;
+  let moved = false;
+  titleRow.addEventListener("pointerdown", e => {
+    // 点击最小化按钮时不启动拖动
+    if (e.target.closest(".update-minimize-btn")) return;
+    dragging = true;
+    moved = false;
+    startX = e.clientX; startY = e.clientY;
+    const r = modal.getBoundingClientRect();
+    origL = r.left; origT = r.top;
+    // 一旦开始拖动就把 left/top 写死到当前坐标，脱离 translateX 默认值
+    modal.style.left = origL + "px";
+    modal.style.top = origT + "px";
+    modal.style.right = "";
+    modal.style.bottom = "";
+    modal.style.transform = "none";
+    modal.classList.add("dragging");
+    // 阻止选择/文本拖动等默认行为
+    e.preventDefault();
+  });
+  document.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+    const maxX = window.innerWidth - 80;
+    const maxY = window.innerHeight - 40;
+    let nx = origL + dx;
+    let ny = origT + dy;
+    if (nx < 8) nx = 8; if (nx > maxX) nx = maxX;
+    if (ny < 8) ny = 8; if (ny > maxY) ny = maxY;
+    modal.style.left = nx + "px";
+    modal.style.top = ny + "px";
+  }, { passive: true });
+  document.addEventListener("pointerup", () => {
+    if (!dragging) return;
+    dragging = false;
+    modal.classList.remove("dragging");
+  });
+}
+/* 最小化 / 徽章交互：最小化把弹窗折叠成右下角小徽章，点击徽章再展开 */
+function bindUpdatePill() {
+  const minBtn = $("update-minimize");
+  const pill = $("update-pill");
+  if (minBtn) minBtn.addEventListener("click", e => { e.stopPropagation(); minimizeUpdateModal(); });
+  if (pill) pill.addEventListener("click", () => restoreUpdateModal());
+  bindUpdateModalDrag();
+}
 $("update-cancel").addEventListener("click", closeUpdateModal);
 $("update-dismiss").addEventListener("click", () => {
   localStorage.setItem(UPDATE_DISMISS_KEY, String(Date.now()));
   closeUpdateModal();
 });
-$("update-modal").addEventListener("click", e => { if (e.target === $("update-modal")) closeUpdateModal(); });
+/* 点击遮罩：因为更新弹窗已非模态，不再响应「点空白关闭」——
+   用户可能只是想点到主程序，避免误关。取消/稍后按钮负责真正的关闭。 */
+// $("update-modal").addEventListener("click", e => { if (e.target === $("update-modal")) closeUpdateModal(); });
+bindUpdatePill();
 
 /* 检查更新：手动调用（设置页按钮）+ 冷启动自动检查。
  * 冷启动检查 24h 内已 dismiss 过则跳过。 */

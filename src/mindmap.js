@@ -77,6 +77,11 @@ function bytesToBase64(u8) {
 function esc(s) {
   return String(s ? s : "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
+/* 节点内容 → HTML：换行转 <br/>。思维块支持回车换行（见 enterEdit 里对 Enter 的拦截），
+   存储格式是 \n；渲染时把 \n 转回 <br/>，让视觉上真的是多行而不是被压成一坨。 */
+function escWithBreaks(s) {
+  return esc(s).replace(/\n/g, "<br/>");
+}
 function nowTs() { return Date.now(); }
 
 /* ---------- DOM 引用 ---------- */
@@ -148,8 +153,11 @@ const expandedImgs = new Set();// 处于「展开画廊」状态的 nodeId
 const imgUrlCache = new Map(); // file_path -> objectURL/dataURL（或正在读取的 Promise）
 let _pendingImgNodeId = null;  // 文件选择框当前要写入的目标节点
 /* 思维块图片剪贴板：复制/剪切后可到其它思维块粘贴（Ctrl+V 或点「粘贴」）。
-   bytes 提前读出，粘贴时不再依赖源图片/源节点是否还在。 */
-let _mindClip = null;          // { mode:"copy"|"cut", nodeId, items:[{ id, node_id, file_name, file_path, bytes }] }
+   bytes 提前读出，粘贴时不再依赖源图片/源节点是否还在。
+   type 标记：
+     - "image"（默认）：仅图片复制/剪切（旧逻辑）
+     - "mindBlock"：整块思维块的复制（含文本 + 图片），粘贴新建节点 */
+let _mindClip = null;          // { mode:"copy"|"cut", type:"image"|"mindBlock", nodeId, items:[...] }
 let _sawPasteEvent = false;    // Ctrl/⌘+V 时 paste 事件是否已到达（用于键盘兜底判定）
 let _vFallbackTimer = null;    // 键盘兜底的延迟定时器
 /* 应用内跨模块图片剪贴板桥：图片夹「复制 / 剪切」后会把快照挂到 window.__glassImgClip，
@@ -762,7 +770,7 @@ function renderMindCanvas() {
   renderEdges();
   // 空状态提示
   if (nodes.length === 0) {
-    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖节点任意位置移动 · 单击文字编辑<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
+    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
     mindEmpty.hidden = false;
   } else {
     mindEmpty.hidden = true;
@@ -775,11 +783,12 @@ function makeNodeEl(n) {
   el.style.left = n.x + "px";
   el.style.top = n.y + "px";
   el.innerHTML =
+    `<div class="drag-hint" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></div>` +
     `<div class="mind-port port-top" data-side="top"></div>` +
     `<div class="mind-port port-right" data-side="right"></div>` +
     `<div class="mind-port port-bottom" data-side="bottom"></div>` +
     `<div class="mind-port port-left" data-side="left"></div>` +
-    `<div class="mind-node-body" contenteditable="false" spellcheck="false">${esc(n.content)}</div>` +
+    `<div class="mind-node-body" contenteditable="false" spellcheck="false">${escWithBreaks(n.content)}</div>` +
     `<div class="mind-node-imgs" hidden></div>` +
     `<button class="rm-node" title="删除节点">×</button>`;
   nodeEls.set(n.id, el);
@@ -912,7 +921,13 @@ async function applyThumbSrc(imgEl, im) {
   if (u && imgEl.isConnected) imgEl.src = u;
 }
 
-/* ---------- 节点事件 ---------- */
+/* ---------- 节点事件 ----------
+   交互约定：
+   - 任意位置 pointerdown 均可选中并拖拽整个节点（正文/边框/图片条/按钮区）
+   - 单击正文 = 仅选中（不进编辑，方便连续选多个或马上拖）
+   - 双击正文 = 进入文本编辑
+   - 正在编辑中：正文允许选文字/输入，不触发拖拽
+   - 图片条（画廊/缩略图/加图按钮）与删除按钮各自处理，不冒泡到节点拖动 */
 function bindNodeEvents(el, n) {
   el.addEventListener("pointerdown", e => { downOnNode(e, el, n); });
   el.querySelector(".rm-node").addEventListener("click", e => {
@@ -925,10 +940,20 @@ function bindNodeEvents(el, n) {
   const body = el.querySelector(".mind-node-body");
   body.addEventListener("click", e => {
     e.stopPropagation();
-    // 若刚拖完就不进编辑
-    if (drag && drag.moved) return;
+    // 拖动刚结束（真实移动过）→ 屏蔽这次 click，避免误触发编辑
+    if (Date.now() < _suppressClickUntil) return;
+    // 单击：仅选中（若处于编辑态则保持编辑，不打断输入）
+    if (editingNode && editingNode.id === n.id) return;
     selectNode(n.id);
-    enterEdit(n, body);
+  });
+  body.addEventListener("dblclick", e => {
+    e.stopPropagation();
+    if (Date.now() < _suppressClickUntil) return;
+    if (editingNode && editingNode.id === n.id) return;
+    selectNode(n.id);
+    // 把双击坐标传给 enterEdit，让光标落在用户点的那一位置，
+    // 而不是永远被拉到最后——见 enterEdit 里的定位逻辑。
+    enterEdit(n, body, { x: e.clientX, y: e.clientY });
   });
 }
 async function removeNode(id) {
@@ -1009,12 +1034,115 @@ async function copyNodeImage(n, im, mode) {
   if (!bytes || !bytes.length) { toast("操作失败：无法读取图片数据", 3200); return; }
   _mindClip = {
     mode,
+    type: "image",
     nodeId: n.id,
     items: [{ id: im.id, node_id: im.node_id, file_name: im.file_name, file_path: im.file_path, bytes }],
   };
   refreshAllNodeImages();   // 各节点出现「粘贴」按钮
   toast(mode === "cut" ? "已剪切 1 张 —— 到目标思维块按 Ctrl+V 或点「粘贴」"
                        : "已复制 1 张 —— 到目标思维块按 Ctrl+V 或点「粘贴」", 3600);
+}
+
+/* ---------- 思维块（文本 + 图片）整块复制 / 粘贴 ----------
+   语义：Ctrl+Shift+C 复制当前选中思维块；Ctrl+Shift+V 在画布可视区中心新建
+   一个节点，把该思维块的文本与图片快照带过去。剪切与粘贴一致，粘贴后清空。
+   与「仅图片」剪贴板互斥：写入 mindBlock 剪贴板时清空图片剪贴板，反之亦然，
+   避免 Ctrl+V 与 Ctrl+Shift+V 混用时语义混乱。 */
+async function copyMindBlock(nodeId) {
+  const n = nodes.find(x => x.id === nodeId);
+  if (!n) return;
+  // 把内容快照存下来（含图片字节），粘贴时不依赖源节点是否还在
+  const list = nodeImages.get(nodeId) || [];
+  const items = [];
+  for (const im of list) {
+    try {
+      const bytes = await apiReadNodeImageBytes(im.file_path);
+      if (!bytes || !bytes.length) continue;
+      items.push({ file_name: im.file_name, bytes });
+    } catch (e) { console.warn("[思维导图] 快照图片失败:", e); }
+  }
+  _mindClip = {
+    mode: "copy",
+    type: "mindBlock",
+    nodeId,
+    content: String(n.content || ""),
+    items,
+  };
+  // 清空「仅图片」剪贴板，避免 Ctrl+V 与 Ctrl+Shift+V 语义冲突
+  try { window[SHARED_CLIP_KEY] = null; } catch {}
+  // 顺带把文本 + 图片写入系统剪贴板，便于粘贴到任意应用。
+  // 包 try/catch：剪贴板 API 在权限受限/无用户手势的场景（如自动测试）可能挂起，
+  // 不能让系统剪贴板失败阻塞应用内状态同步与工具栏刷新。
+  try { await writeMindBlockToSystemClipboard(String(n.content || ""), items); }
+  catch (e) { console.warn("[思维导图] 系统剪贴板写入失败，仅保留应用内剪贴板:", e); }
+  refreshAllNodeImages();
+  syncMindToolbarBtns();
+  const label = (n.content || "").trim().replace(/\s+/g, " ").slice(0, 20);
+  toast(label ? `已复制思维块「${label}」${items.length ? `（含 ${items.length} 张图）` : ""} —— 到目标位置按 Ctrl+Shift+V`
+              : `已复制空思维块${items.length ? `（含 ${items.length} 张图）` : ""} —— 到目标位置按 Ctrl+Shift+V`, 3600);
+}
+
+/* 把思维块写入系统剪贴板（Ctrl+V 到其它应用时也能用）。
+   优先策略：只有图片 → 写图片；只有文本 → 写文本；两者皆有 → 仅写文本
+   （因为 WKWebView 的 ClipboardItem 需要构造时同步持有 Blob，混写文本+图片
+   在多张图时容易失败，且思维块场景下文本更重要，图片走应用内 _mindClip）。 */
+async function writeMindBlockToSystemClipboard(content, items) {
+  const cb = typeof navigator !== "undefined" ? navigator.clipboard : null;
+  if (!cb) return;
+  const text = String(content || "");
+  const imgs = (items || []).filter(it => it && it.bytes && it.bytes.length);
+  try {
+    if (imgs.length && typeof cb.write === "function" && !text) {
+      // 纯图片：写系统剪贴板图片，供其它 App 直接粘贴
+      const types = {};
+      for (const it of imgs) {
+        const name = it.file_name || "clip.png";
+        const mime = guessMime(name);
+        if (!types[mime]) types[mime] = new Blob([it.bytes], { type: mime });
+      }
+      await cb.write([new ClipboardItem(types)]);
+      return;
+    }
+    if (text) {
+      if (typeof cb.writeText === "function") await cb.writeText(text);
+      return;
+    }
+    // 图片多于一种、无文本时：只把第一张写成剪贴板
+    if (imgs.length && typeof cb.write === "function") {
+      const it = imgs[0];
+      const name = it.file_name || "clip.png";
+      const mime = guessMime(name);
+      await cb.write([new ClipboardItem({ [mime]: new Blob([it.bytes], { type: mime }) })]);
+    }
+  } catch (e) { console.warn("[思维导图] 写入系统剪贴板失败:", e); }
+}
+/* 在视口中心粘贴思维块副本。位置：以画布可视区中心为基准，
+   与源节点重叠时轻微错位，方便肉眼看到新旧节点关系。 */
+async function pasteMindBlock() {
+  if (!_mindClip || _mindClip.type !== "mindBlock") {
+    toast("没有思维块可粘贴：请先选中一个思维块后按 Ctrl+Shift+C", 3200);
+    return;
+  }
+  if (!activeMap) return;
+  const r = mindCanvas.getBoundingClientRect();
+  const cwx = (r.width / 2 - view.x) / view.zoom - 60;
+  const cwy = (r.height / 2 - view.y) / view.zoom - 25;
+  // 源节点若就在这个位置，往右下错位 40px，避免完全叠在一起
+  const src = nodes.find(x => x.id === _mindClip.nodeId);
+  let px = cwx, py = cwy;
+  if (src && Math.abs(src.x - px) < 30 && Math.abs(src.y - py) < 30) { px += 40; py += 40; }
+  // createNodeAt 内部已经做了选中 + 进入编辑
+  const n = await createNodeAt(px, py, _mindClip.content || "");
+  if (!n) return;
+  // 粘贴后把图片文件写进新节点
+  if (_mindClip.items.length) {
+    const files = _mindClip.items.map((it, i) => {
+      const name = it.file_name || `clip-${Date.now()}-${i}.png`;
+      return new File([it.bytes], name, { type: guessMime(name) });
+    });
+    await addImagesToNode(n.id, files);
+  }
+  // 复制语义：保留剪贴板，允许连续粘贴
 }
 /* 把剪贴板里的图片贴入目标思维块；剪切模式下成功后再删除源图。 */
 async function pasteNodeImages(targetNodeId) {
@@ -1055,9 +1183,11 @@ async function pasteSharedImages(targetNodeId) {
   }
   if (c.mode === "cut") { try { window[SHARED_CLIP_KEY] = null; } catch {} }
 }
-/* 剪贴板有内容时，为图片操作条追加「粘贴」按钮 */
+/* 剪贴板有图片内容时，为图片操作条追加「粘贴」按钮；
+   mindBlock 类型的剪贴板不在此处显示——那走 Ctrl+Shift+V，在画布中心新建节点。 */
 function appendPasteBtn(bar, nodeId) {
   if (!_mindClip || !_mindClip.items.length) return;
+  if (_mindClip.type === "mindBlock") return;
   const btn = document.createElement("button");
   btn.className = "mind-node-paste-img";
   btn.textContent = _mindClip.mode === "cut" ? "📋 粘贴（剪切）" : "📋 粘贴";
@@ -1205,25 +1335,96 @@ function selectNode(id) {
   for (const [nid, el] of nodeEls) {
     el.classList.toggle("selected", nid === id);
   }
+  if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
 }
-function enterEdit(n, body) {
+/* 在纯文本的可编辑区里，按 (x,y) 坐标定位光标。
+   思路：在目标 text node 里对每个字符边界构造一个 collapsed range，
+   用 range.getBoundingClientRect() 拿到该「点」的 rect，再判断点击坐标
+   是否落在该点的矩形附近（±1px 容忍）。这样能正确处理多行换行——
+   每行的每个字符都有自己的 rect，不会因为点击第二行而算到第一行的字符数。
+   命中不了任何字符边界（比如点在空白 padding 上）返回 false，让调用方兜底。 */
+function caretAtXY(body, x, y) {
+  const sel = window.getSelection();
+  for (const child of body.childNodes) {
+    if (child.nodeType !== 3) continue;
+    const len = child.data.length;
+    const range = document.createRange();
+    // 遍历 [0, len] 共 len+1 个字符边界；每个边界对应的矩形就是该处可停的光标位置。
+    for (let idx = 0; idx <= len; idx++) {
+      range.setStart(child, idx);
+      range.collapse(true);
+      const r = range.getBoundingClientRect();
+      // 光标 rect 宽度常为 0，中心点即 r.left；容差 ±1px 处理亚像素偏差
+      const cx = r.width > 0 ? r.left + r.width / 2 : r.left;
+      if (x >= cx - 1 && x <= cx + 1 && y >= r.top - 1 && y <= r.bottom + 1) {
+        sel.removeAllRanges();
+        sel.addRange(range);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function enterEdit(n, body, anchor) {
   editingNode = n;
   selectedNodeId = n.id;
   body.setAttribute("contenteditable", "true");
   body.focus();
-  // 光标移到最后
-  const range = document.createRange();
-  range.selectNodeContents(body);
-  range.collapse(false);
+  // 光标定位：双击/回车进入编辑时优先落在用户点击的位置（更符合直觉），
+  // 只在拿不到坐标或点在了文本外（比如空白 padding）时才退化为行首。
+  // 之前的实现是无脑 collapse(false) 把光标送到末尾，即使用户明明点在开头，
+  // 结果还得用方向键手动挪回——这就是「光标无法随意定位」的直接原因。
+  let placed = false;
+  if (anchor && typeof anchor.x === "number" && typeof anchor.y === "number") {
+    placed = caretAtXY(body, anchor.x, anchor.y);
+  }
+  if (!placed) {
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    range.collapse(true);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+  body.addEventListener("blur", () => exitEdit(n, body), { once: true });
+  // 回车支持：contenteditable 默认会把 Enter 转成 <div>/<br>，但存储格式用 \n。
+  // 这里手工在光标位置插入 <br>，退出编辑时用 innerText 读回（innerText 会把
+  // <br> 自动转成 \n），保证多行文本进/出一致。
+  body.addEventListener("keydown", e => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    e.stopPropagation();
+    insertBreakAtCaret(body);
+  });
+}
+/* 在 contenteditable 当前光标位置插入一个 <br>。
+   用 Range API 而不是 execCommand('insertText', '\n')——后者在不同内核下
+   行为不一致（Chromium 会插字面 \n，Safari 会插 <br>，WebKit 视具体版本），
+   统一手工插入 <br> 最稳。 */
+function insertBreakAtCaret(body) {
+  if (!body || !body.isContentEditable) return;
+  body.focus();
   const sel = window.getSelection();
+  if (!sel || !sel.rangeCount) return;
+  const range = sel.getRangeAt(0);
+  if (!body.contains(range.commonAncestorContainer)) return;
+  // 若选区覆盖了跨行文本，直接压平，避免 Enter 静默删掉用户已选中的内容
+  range.deleteContents();
+  const br = document.createElement("br");
+  range.insertNode(br);
+  // 光标落到新 <br> 之后（视觉上就是"下一行起点"）
+  range.setStartAfter(br);
+  range.collapse(true);
   sel.removeAllRanges();
   sel.addRange(range);
-  body.addEventListener("blur", () => exitEdit(n, body), { once: true });
 }
 async function exitEdit(n, body) {
   body.setAttribute("contenteditable", "false");
   editingNode = null;
-  const content = body.textContent.trim();
+  // innerText 会把 <br> 转成 \n、把 <div> 之间的分隔转成 \n，比 textContent 更贴近
+  // "用户在多行文本框里看到的内容"；同时把 Windows 上可能出现的 \r\n 归一成 \n。
+  const content = String(body.innerText != null ? body.innerText : body.textContent || "")
+                    .replace(/\r\n?/g, "\n").trim();
   if (content !== (n.content || "")) {
     n.content = content;
     await apiUpdateNodeContent(n.id, content);
@@ -1231,11 +1432,16 @@ async function exitEdit(n, body) {
   }
   if (n.id === selectedNodeId) {
     const el = nodeEls.get(n.id);
-    if (el) { const nb = el.querySelector(".mind-node-body"); nb.innerHTML = esc(content); }
+    if (el) { const nb = el.querySelector(".mind-node-body"); nb.innerHTML = escWithBreaks(content); }
   }
 }
 
-/* ---------- 节点拖拽 ---------- */
+/* ---------- 节点拖拽 ----------
+   拖动结束后的 click 事件会在 pointerup 之后才派发，此时 drag 已清空，
+   单靠 drag 判空是拦不住的——用 _suppressClickUntil 时间戳窗口兜底，
+   只在「真的发生了移动」时才屏蔽后续 click/dblclick，避免用户拖完节点
+   又被误触发文本编辑或选中状态抖动。 */
+let _suppressClickUntil = 0;
 function downOnNode(e, el, n) {
   if (e.button !== 0) return;
   e.stopPropagation();
@@ -1243,6 +1449,11 @@ function downOnNode(e, el, n) {
   if (e.target.closest(".mind-node-imgs")) return;
   // 正在编辑的节点：允许选择文字，不触发整节点拖动
   if (editingNode && editingNode.id === n.id && e.target.closest(".mind-node-body")) return;
+  // 正文（非编辑态）上按下的瞬间立刻 preventDefault，
+  // 阻止浏览器在 pointerdown 期间启动任何文本选择/光标定位——
+  // 否则拖拽开始那 4px 阈值内用户会先看到「文本被选中」再进入拖动，
+  // 视觉上像「先选字再拖」，是「很难选择并拖动」的直接原因之一。
+  if (e.target.closest(".mind-node-body")) e.preventDefault();
   selectNode(n.id, el);
   const startX = e.clientX, startY = e.clientY;
   const oX = n.x, oY = n.y;
@@ -1266,7 +1477,11 @@ function downOnNode(e, el, n) {
     window.removeEventListener("pointercancel", onUp);
     const moved = drag && drag.moved;
     drag = null;
-    if (moved) { await apiUpdateNodePos(n.id, n.x, n.y); renderEdges(); }
+    if (moved) {
+      _suppressClickUntil = Date.now() + 300;   // 拖过才屏蔽后续 click
+      await apiUpdateNodePos(n.id, n.x, n.y);
+      renderEdges();
+    }
   };
   placeNodeOnTop(el, n);
   window.addEventListener("pointermove", onMove);
@@ -1525,13 +1740,31 @@ function deselectAll() {
   selectedNodeId = null; selectedEdgeId = null;
   for (const [ , el] of nodeEls) el.classList.remove("selected");
   mindEdgesSvg.querySelectorAll(".mind-edge").forEach(g => g.classList.remove("selected"));
+  if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
 }
 
 /* ---------- 工具栏 / 键盘 ---------- */
+const mindCopyBlockBtn = $("mind-copy-block");
+const mindPasteBlockBtn = $("mind-paste-block");
+function syncMindToolbarBtns() {
+  if (mindCopyBlockBtn) {
+    const show = !!(activeMap && selectedNodeId != null);
+    mindCopyBlockBtn.hidden = !show;
+  }
+  if (mindPasteBlockBtn) {
+    const ok = !!(activeMap && _mindClip && _mindClip.type === "mindBlock");
+    mindPasteBlockBtn.hidden = !ok;
+  }
+}
 function bindToolbar() {
   zoomInBtn.addEventListener("click", e => zoomBy(1.1, e.clientX, e.clientY));
   zoomOutBtn.addEventListener("click", e => zoomBy(0.9091, e.clientX, e.clientY));
   fitBtn.addEventListener("click", fitView);
+  if (mindCopyBlockBtn) mindCopyBlockBtn.addEventListener("click", () => {
+    if (selectedNodeId == null) { toast("请先选中一个思维块再复制", 2600); return; }
+    copyMindBlock(selectedNodeId);
+  });
+  if (mindPasteBlockBtn) mindPasteBlockBtn.addEventListener("click", () => pasteMindBlock());
 }
 /* 确认弹窗：确定/取消按钮 + 点击遮罩关闭 + Enter/Escape 快捷键。
    事件在 init 里注册一次，全局复用；askConfirm 每次只显示/隐藏。 */
@@ -1558,31 +1791,39 @@ function bindImagePaste() {
     if (mindLightbox && !mindLightbox.hidden) return;
     const ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+    // 优先使用应用内剪贴板（_mindClip / __glassImgClip）——它们代表用户最近的显式
+    // 复制/剪切意图；系统剪贴板（cd 里的 files 或 fallback 兜底读出的图）可能是
+    // 上次截图/其他应用的旧残留，若优先走它，剪切就退化成复制（源图不会被清理）。
+    // 因此只有当内部剪贴板为空时才读取系统剪贴板图片。
     const cd = e.clipboardData;
-    const files = [];
-    for (const it of Array.from((cd && cd.items) || [])) {
-      if (it.kind === "file" && it.type && /^image\//i.test(it.type)) {
-        const f = it.getAsFile();
-        if (f) files.push(f);
+    // 「仅图片」剪贴板：mindBlock 类型的剪贴板走 Ctrl+Shift+V，Ctrl+V 不处理
+    const hasInternal = !!(_mindClip && _mindClip.items.length && (_mindClip.type || "image") === "image");
+    const hasShared = !!readSharedClip();
+    // 直接来自 paste 事件（浏览器/系统）的图片——通常是外部截图/其它应用复制
+    let extFiles = [];
+    if (!hasInternal && !hasShared) {
+      for (const it of Array.from((cd && cd.items) || [])) {
+        if (it.kind === "file" && it.type && /^image\//i.test(it.type)) {
+          const f = it.getAsFile();
+          if (f) extFiles.push(f);
+        }
       }
+      // 复制自网页/其它应用的图片常常只出现在 HTML/URL 里，或干脆没进 paste 事件，逐个兜底。
+      if (!extFiles.length) extFiles.push(...await clipboardImageFallbacks(cd));
     }
-    // 复制自网页/其它应用的图片常常只出现在 HTML/URL 里，或干脆没进 paste 事件，逐个兜底。
-    if (!files.length) files.push(...await clipboardImageFallbacks(cd));
     // 正在编辑文字、且剪贴板里是纯文本时，让浏览器默认粘贴生效——
     // 否则应用内图片剪贴板会「抢走」本该粘贴进去的文字。
     const plainText = (cd && cd.getData ? cd.getData("text/plain") : "") || "";
     const editingText = !!editingNode || !!(ae && ae.isContentEditable);
-    if (!files.length && plainText.trim() && editingText) return;
-    const hasInternal = !!(_mindClip && _mindClip.items.length);
-    const hasShared = !!readSharedClip();
-    if (!files.length && !hasInternal && !hasShared) return;   // 非图片粘贴：不打扰默认行为
+    if (!extFiles.length && !hasInternal && !hasShared && plainText.trim() && editingText) return;
+    if (!extFiles.length && !hasInternal && !hasShared) return;   // 非图片粘贴：不打扰默认行为
     e.preventDefault();
     // 正在编辑文字时优先写入被编辑的节点，否则写入当前选中节点
     const targetId = editingNode ? editingNode.id : selectedNodeId;
     if (targetId == null) { toast("请先选中一个思维块，再粘贴图片", 3200); return; }
-    if (files.length) await addImagesToNode(targetId, files);
-    else if (hasInternal) await pasteNodeImages(targetId);
-    else await pasteSharedImages(targetId);
+    if (hasInternal) await pasteNodeImages(targetId);
+    else if (hasShared) await pasteSharedImages(targetId);
+    else await addImagesToNode(targetId, extFiles);
   });
   // 键盘兜底：个别 WebView（如 macOS WKWebView）在剪贴板里只有图片时可能「不派发 paste 事件」，
   // 这样上面的剪贴板兜底也就无从谈起。这里在按下 Ctrl/⌘+V 后延迟检查一次：
@@ -1595,11 +1836,15 @@ function bindImagePaste() {
     _vFallbackTimer = setTimeout(() => { if (!_sawPasteEvent) fallbackPasteClipboardImage(); }, 180);
   });
 }
-/* 键盘兜底的实际动作：把系统剪贴板图片贴进当前编辑/选中的节点（仅桌面端）。 */
+/* 键盘兜底的实际动作：把系统剪贴板图片贴进当前编辑/选中的节点（仅桌面端）。
+   优先走内部剪贴板（_mindClip / __glassImgClip），避免残留的系统截图把
+   「剪切」意图覆盖成「复制」——这是与 bindImagePaste 相同的优先级规则。 */
 async function fallbackPasteClipboardImage() {
   if (!isTauri()) return;
   const targetId = editingNode ? editingNode.id : selectedNodeId;
   if (targetId == null) return;
+  if (_mindClip && _mindClip.items.length && (_mindClip.type || "image") === "image") { await pasteNodeImages(targetId); return; }
+  if (readSharedClip()) { await pasteSharedImages(targetId); return; }
   const f = await apiReadClipboardImage();
   if (f) await addImagesToNode(targetId, [f]);
 }
@@ -1675,6 +1920,19 @@ function bindKeyboard() {
   document.addEventListener("keydown", e => {
     if (mindPane.hidden || !activeMap) return;
     if (mindLightbox && !mindLightbox.hidden) return;   // 灯箱打开时不吃删除键
+    // Ctrl/⌘+Shift+C：复制当前选中思维块（含文本 + 图片）
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyC") {
+      if (selectedNodeId == null) { toast("请先选中一个思维块再复制", 2600); return; }
+      e.preventDefault();
+      copyMindBlock(selectedNodeId);
+      return;
+    }
+    // Ctrl/⌘+Shift+V：把剪贴板里的思维块贴到画布可视区中心
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === "KeyV") {
+      e.preventDefault();
+      pasteMindBlock();
+      return;
+    }
     if (e.key !== "Delete" && e.key !== "Backspace") return;
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;

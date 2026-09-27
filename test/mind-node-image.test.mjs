@@ -266,7 +266,34 @@ test("paste 从剪贴板提取图片文件并写入编辑中/选中的节点", (
   assert.ok(/getAsFile\(\)/.test(b), "应取出图片文件");
   assert.ok(/e\.preventDefault\(\)/.test(b), "有图片时应阻止默认粘贴");
   assert.ok(/editingNode \? editingNode\.id : selectedNodeId/.test(b), "应定位到编辑中/选中的节点");
-  assert.ok(/addImagesToNode\(targetId, files\)/.test(b), "应调用 addImagesToNode 落库");
+  assert.ok(/addImagesToNode\(targetId, extFiles\)/.test(b), "外部图片应调用 addImagesToNode 落库");
+});
+
+// 回归：剪切后再 Ctrl+V 到其它思维块，内部剪贴板必须优先于系统剪贴板，
+// 否则残留的系统截图会让「剪切」退化成「复制」——源图不会被清理。
+test("内部剪贴板优先于系统剪贴板（避免剪切变复制）", () => {
+  const b = fnBody(CODE, "function bindImagePaste(");
+  // 内部/共享剪贴板判定必须发生在读取外部 paste 文件之前
+  const idxInternal = b.indexOf("const hasInternal");
+  const idxExtFiles = b.indexOf("let extFiles = []");
+  assert.ok(idxInternal >= 0 && idxExtFiles >= 0, "应分别有 hasInternal / extFiles 判定");
+  assert.ok(idxInternal < idxExtFiles, "应先判定内部剪贴板，再读取系统 paste 文件");
+  // 系统剪贴板 items 循环必须被包裹在「内部为空」的守卫内（hasInternal < for-of < hasShared 出现次序）
+  const idxGuard = b.indexOf("if (!hasInternal && !hasShared)");
+  const idxForItems = b.indexOf("for (const it of Array.from((cd && cd.items)");
+  assert.ok(idxGuard >= 0, "应有 if(!hasInternal && !hasShared) 守卫");
+  assert.ok(idxForItems > idxGuard, "系统剪贴板 items 循环必须出现在守卫之后");
+  // 内部剪贴板优先分派
+  assert.ok(/if \(hasInternal\) await pasteNodeImages\(targetId\);/.test(b),
+    "内部剪贴板存在时优先走 pasteNodeImages（会清理源图）");
+});
+
+test("键盘兜底 paste 同样优先走内部剪贴板", () => {
+  const b = fnBody(CODE, "async function fallbackPasteClipboardImage(");
+  assert.ok(/if \(_mindClip && _mindClip\.items\.length && \(_mindClip\.type \|\| "image"\) === "image"\) \{ await pasteNodeImages\(targetId\); return; \}/.test(b),
+    "内部剪贴板优先（仅图片类型），避免剪切/思维块被 Ctrl+V 退化");
+  assert.ok(/if \(readSharedClip\(\)\) \{ await pasteSharedImages\(targetId\); return; \}/.test(b),
+    "共享剪贴板次之");
 });
 
 test("init 注册了 paste 绑定", () => {
