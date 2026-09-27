@@ -19,6 +19,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
+# 直接读取系统剪贴板图片：部分 WebView（尤其 macOS WKWebView）不会把截图塞进
+# paste 事件的 clipboardData，需要后端兜底，否则「截图粘贴」会失效。
+arboard = "3"
 
 [lib]
 name = "task_manager_lib"

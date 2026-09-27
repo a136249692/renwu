@@ -1533,7 +1533,11 @@ function layoutStackedRows(stage, originY, insertB, tailLimit) {
   for (const b of others) {
     b.x = 20; b.row = true;
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
-    const h = el ? el.offsetHeight : 44;
+    // 兜底：元素处于 display:none（尚未走完显示切换）时 offsetHeight 返回 0，
+    // 若按 0 累积 cursor 会把所有块挤在同一高度、造成「向上滚动加载后内容重叠」。
+    // 用默认块高 44 兜底，确保布局步长始终 ≥ 54（44+10）。
+    let h = el ? el.offsetHeight : 0;
+    if (!h || h < 44) h = 44;
     b.y = cursor;
     cursor += h + 10;
   }
@@ -1576,7 +1580,30 @@ function relayout(initial) {
      这符合「用户还没加载就默认看不到老数据」的语义。 */
   const doneTotal = blocks.filter(b => b.stage === "done").length;
   const doneVisible = getDoneVisible(activeFolderId);
-  const doneRes = layoutStackedRows("done", 14, insertB, Math.min(doneVisible, doneTotal));
+  const doneTailLimit = Math.min(doneVisible, doneTotal);
+
+  /* 关键：在 layoutStackedRows 度量前先把 done 块的显隐状态按新的分页规则就位。
+     否则「向上滚动加载」会把先前 display:none 的块拉进可见列表，
+     layoutStackedRows 读到 offsetHeight=0（display:none 元素测不到高度），
+     cursor 只推进 10px 而非 54px，导致所有块堆叠重叠。
+     这里先用与 layoutStackedRows 相同的排序规则算出「可见集合」，
+     把不在集合里的块显式设 display:none，集合内的块恢复 display:""，
+     然后再让 layoutStackedRows 测量。 */
+  const mode_ = getDoneSortMode();
+  const allDoneSorted = blocks
+    .filter(b => b.stage === "done" && b !== insertB)
+    .sort(mode_ === "manual" ? (a, b) => a.y - b.y : (a, b) => a.createdAt - b.createdAt);
+  const visiblePool = allDoneSorted.slice(Math.max(0, allDoneSorted.length - doneTailLimit));
+  const presetShownDoneIds = new Set(visiblePool.map(b => b.id));
+  if (insertB && insertB.stage === "done") presetShownDoneIds.add(insertB.id);
+  for (const b of blocks) {
+    if (b.stage !== "done") continue;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el) continue;
+    el.style.display = presetShownDoneIds.has(b.id) ? "" : "none";
+  }
+
+  const doneRes = layoutStackedRows("done", 14, insertB, doneTailLimit);
   const defDy = defaultDoneY();
   const dy = doneRes.list.length ? Math.max(defDy, 14 + doneRes.total + 46) : defDy;
 
@@ -1595,14 +1622,18 @@ function relayout(initial) {
   paintDivider();
 
   /* 分页显示：把未进入 done 段展示的块从 DOM 里隐藏（display:none）。
-     保留 DOM 节点是为了保留事件监听器 / edit 状态，只显示/隐藏即可。 */
+     保留 DOM 节点是为了保留事件监听器 / edit 状态，只显示/隐藏即可。
+     注：显隐已在 layoutStackedRows 之前预置一次（保证 offsetHeight 可度量），
+     这里以最终 layout 结果为准再校正一次，覆盖 insertB 被插入/挪动等边界情况。 */
   const shownDoneIds = new Set(doneRes.list.map(b => b.id));
   for (const b of blocks) {
     if (b.stage !== "done") continue;
     const el = board.querySelector(`.block[data-id="${b.id}"]`);
     if (!el) continue;
     const show = shownDoneIds.has(b.id);
-    el.style.display = show ? "" : "none";
+    if ((el.style.display === "none") !== !show) {
+      el.style.display = show ? "" : "none";
+    }
   }
 
   // 越界清理：分界线随内容下移后，原先紧贴 reviewY 下方摆放的待完成块会

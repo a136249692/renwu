@@ -104,7 +104,7 @@
             <div class="stage-header" id="mind-header">
               <h2 id="mind-title">思维导图</h2>
               <span class="meta" id="mind-meta"></span>
-              <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
+              <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · 节点内 <kbd>＋ 图片</kbd> 加图（可多张）· 选中节点后 <kbd>Ctrl/⌘+V</kbd> 粘贴图片 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
             </div>
             <div class="mind-toolbar" id="mind-toolbar" hidden>
               <button id="mind-zoom-out" title="缩小">−</button>
@@ -121,7 +121,9 @@
             <div class="mind-empty" id="mind-empty">
               <b>双击空白处</b> 即可新建思维节点<br />
               拖节点上任意位置移动 · 单击文字编辑内容<br />
-              悬停节点显示连接点，从连接点拖到另一节点即可连线
+              悬停节点显示连接点，从连接点拖到另一节点即可连线<br />
+              节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br />
+              选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块
             </div>
           </div>
         </div>
@@ -135,6 +137,11 @@
             </div>
             <div class="mind-toolbar" id="image-toolbar" hidden>
               <button id="image-add" title="上传图片">＋ 上传</button>
+              <span class="tb-sep" aria-hidden="true"></span>
+              <button id="image-copy"  title="复制选中的图片到剪贴板（Ctrl+C）" hidden>📋 复制</button>
+              <button id="image-cut"   title="剪切选中的图片（Ctrl+X，原夹移除）" hidden>✂️ 剪切</button>
+              <button id="image-paste" title="粘贴到当前图片夹（Ctrl+V）" hidden>📥 粘贴</button>
+              <span class="tb-sep" aria-hidden="true"></span>
               <button id="image-combine" title="组合选中图片（Ctrl+M）：合成一张新 PNG" hidden style="display:none">⧉ 组合</button>
               <button id="image-uncombine" title="选中一张组合图片后可拆分（Ctrl+Z）" hidden style="display:none">↩ 拆分</button>
               <span class="tb-sep" aria-hidden="true"></span>
@@ -267,7 +274,26 @@
       </div>
     </div>
 
+    <!-- 思维节点图片灯箱：点击图片后全屏缩放查看 -->
+    <div class="img-lightbox" id="mind-lightbox" hidden>
+      <div class="lb-backdrop" id="mind-lightbox-backdrop"></div>
+      <div class="lb-stage" id="mind-lightbox-stage">
+        <img id="mind-lightbox-img" alt="" draggable="false" />
+      </div>
+      <button class="lb-nav lb-prev" id="mind-lightbox-prev" title="上一张（←）" hidden>‹</button>
+      <button class="lb-nav lb-next" id="mind-lightbox-next" title="下一张（→）" hidden>›</button>
+      <button class="lb-close" id="mind-lightbox-close" title="关闭（Esc）">×</button>
+      <div class="lb-count" id="mind-lightbox-count" hidden></div>
+      <div class="lb-tools">
+        <button id="mind-lightbox-zoom-out" title="缩小">−</button>
+        <span id="mind-lightbox-zoom-label">100%</span>
+        <button id="mind-lightbox-zoom-in" title="放大">＋</button>
+        <button id="mind-lightbox-reset" title="重置缩放">⟲ 重置</button>
+      </div>
+    </div>
+
     <input type="file" id="image-file-input" accept="image/*" multiple hidden />
+    <input type="file" id="mind-image-input" accept="image/*" multiple hidden />
     <script type="module" src="./main.js"></script>
     <script type="module" src="./mindmap.js"></script>
     <script type="module" src="./image-wall.js"></script>

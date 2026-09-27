@@ -1171,6 +1171,138 @@ mark {
 }
 .mind-empty b { color: var(--muted); font-size: 15px; }
 
+/* ═══ 思维节点图片 ═══ */
+.mind-node-imgs {
+  padding: 0 12px 12px; margin-top: -4px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.mind-node-imgs[hidden] { display: none; }
+/* 折叠态：单张封面缩略图 + 张数角标，点击展开成一行多列画廊 */
+.mind-node-cover {
+  position: relative; width: 56px; height: 56px; border-radius: 9px; overflow: hidden;
+  border: 1px solid rgba(15,23,42,0.10); cursor: var(--cursor-arrow);
+  background: #f4f5f7; transition: box-shadow 0.15s var(--ease);
+}
+.mind-node-cover:hover { box-shadow: 0 4px 12px rgba(15,23,42,0.16); }
+.mind-node-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mind-node-cover .cover-count {
+  position: absolute; right: 3px; bottom: 3px; min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 8px; background: rgba(15,23,42,0.72); color: #fff; font-size: 10px;
+  font-weight: 600; line-height: 15px; text-align: center;
+}
+/* 展开态：一行多列（横向滚动），每张为方块缩略图 */
+.mind-node-gallery {
+  display: flex; flex-direction: row; flex-wrap: nowrap; gap: 6px;
+  overflow-x: auto; overflow-y: hidden; padding-bottom: 2px;
+}
+.mind-node-gallery::-webkit-scrollbar { height: 6px; }
+.mind-node-gallery::-webkit-scrollbar-thumb { background: rgba(15,23,42,0.18); border-radius: 3px; }
+.mind-node-thumb {
+  position: relative; flex: 0 0 auto; width: 56px; height: 56px; border-radius: 9px;
+  overflow: hidden; border: 1px solid rgba(15,23,42,0.10); background: #f4f5f7;
+  cursor: zoom-in; transition: box-shadow 0.15s var(--ease), transform 0.15s var(--ease);
+}
+.mind-node-thumb:hover { box-shadow: 0 4px 12px rgba(15,23,42,0.18); transform: translateY(-1px); }
+.mind-node-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mind-node-thumb .thumb-del {
+  position: absolute; top: 2px; right: 2px; width: 16px; height: 16px; border: none;
+  border-radius: 50%; background: rgba(15,23,42,0.62); color: #fff; font-size: 11px;
+  line-height: 16px; text-align: center; padding: 0; opacity: 0; cursor: var(--cursor-arrow);
+  transition: opacity 0.15s var(--ease), background 0.15s var(--ease);
+}
+.mind-node-thumb:hover .thumb-del { opacity: 1; }
+.mind-node-thumb .thumb-del:hover { background: var(--danger); }
+/* 悬停时出现的「复制 / 剪切」小按钮（底部操作条） */
+.mind-node-thumb .thumb-acts {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: center;
+  gap: 3px; padding: 3px 0 2px; opacity: 0;
+  background: linear-gradient(to top, rgba(15,23,42,0.55), rgba(15,23,42,0));
+  transition: opacity 0.15s var(--ease);
+}
+.mind-node-thumb:hover .thumb-acts { opacity: 1; }
+.mind-node-thumb .thumb-act {
+  width: 20px; height: 16px; padding: 0; border: none; border-radius: 4px;
+  background: rgba(255,255,255,0.9); color: #0f172a; font-size: 10px; line-height: 16px;
+  text-align: center; cursor: var(--cursor-arrow); transition: background 0.15s var(--ease);
+}
+.mind-node-thumb .thumb-act:hover { background: #fff; }
+.mind-node-img-toggle {
+  align-self: flex-start; border: none; background: transparent; color: var(--faint);
+  font-size: 11px; padding: 0; cursor: var(--cursor-arrow);
+}
+.mind-node-img-toggle:hover { color: var(--accent); }
+/* 图片区操作条：加图按钮 */
+.mind-node-img-bar { display: flex; gap: 6px; }
+.mind-node-add-img {
+  border: 1px dashed rgba(15,23,42,0.24); background: rgba(255,255,255,0.6);
+  color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 7px;
+  cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
+}
+.mind-node-add-img:hover { border-color: var(--accent); color: var(--accent); }
+/* 图片区操作条：粘贴按钮（剪贴板有内容时才出现） */
+.mind-node-paste-img {
+  border: 1px solid rgba(15,23,42,0.18); background: rgba(255,255,255,0.6);
+  color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 7px;
+  cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
+}
+.mind-node-paste-img:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ═══ 图片灯箱（缩放查看） ═══ */
+.img-lightbox {
+  position: fixed; inset: 0; z-index: 3000; overflow: hidden;
+  background: rgba(10,12,16,0.86);
+}
+.img-lightbox[hidden] { display: none; }
+.lb-backdrop { position: absolute; inset: 0; }
+.lb-stage {
+  position: absolute; inset: 0; display: grid; place-content: center;
+  cursor: grab; overflow: hidden;
+}
+.lb-stage.dragging { cursor: grabbing; }
+.lb-stage img {
+  max-width: 92vw; max-height: 88vh; user-select: none; -webkit-user-drag: none;
+  transform-origin: center center; will-change: transform;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5); border-radius: 6px;
+}
+.lb-close {
+  position: absolute; top: 16px; right: 20px; width: 38px; height: 38px; border: none;
+  border-radius: 50%; background: rgba(255,255,255,0.14); color: #fff; font-size: 22px;
+  line-height: 1; cursor: var(--cursor-arrow); transition: background 0.15s var(--ease);
+}
+.lb-close:hover { background: rgba(255,255,255,0.28); }
+/* 多图切换：左右大箭头 + 顶部计数 */
+.lb-nav {
+  position: absolute; top: 50%; transform: translateY(-50%); width: 46px; height: 46px;
+  border: none; border-radius: 50%; background: rgba(255,255,255,0.14); color: #fff;
+  font-size: 26px; line-height: 1; cursor: var(--cursor-arrow);
+  transition: background 0.15s var(--ease);
+}
+.lb-nav:hover { background: rgba(255,255,255,0.30); }
+.lb-nav[hidden] { display: none; }
+.lb-prev { left: 16px; }
+.lb-next { right: 16px; }
+.lb-count {
+  position: absolute; top: 24px; left: 50%; transform: translateX(-50%);
+  padding: 4px 12px; border-radius: 10px; background: rgba(255,255,255,0.14);
+  color: #fff; font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.lb-count[hidden] { display: none; }
+.lb-tools {
+  position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 12px;
+  background: rgba(255,255,255,0.14); backdrop-filter: blur(8px);
+}
+.lb-tools button {
+  border: none; background: rgba(255,255,255,0.16); color: #fff; font-size: 13px;
+  padding: 5px 12px; border-radius: 8px; cursor: var(--cursor-arrow);
+  transition: background 0.15s var(--ease);
+}
+.lb-tools button:hover { background: rgba(255,255,255,0.34); }
+.lb-tools #mind-lightbox-zoom-label {
+  min-width: 46px; text-align: center; color: #fff; font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 思维导图名称重命名输入框（侧栏列表内） */
 .map-rename-input {
   flex: 1; min-width: 0; font: inherit; font-size: 13.5px; font-weight: 600;
@@ -1237,13 +1369,15 @@ mark {
   display: grid; place-items: center;
 }
 .card-img {
-  /* 用 cover：填满 wrap，保持原始比例并居中裁切。
-     之前用 contain 会在 wrap 与图片比例不一致时出现大块灰底，
-     尤其是 se/s 手柄拖出极端比例时非常难看。
-     用户如需完整图片，双击标题栏可复制再单独看。 */
+  /* 用 contain：完整展示原图的长宽，绝不裁切。
+     卡片高度减去 caption（约 30-40px）后 wrap 的纵横比与图片存在偏差，
+     若用 cover 会在 top/bottom 或左右裁掉一圈，用户看不到完整图片。
+     contain 会在 wrap 空余方向留浅灰底，反而更贴合「图片夹」原意——
+     用户粘贴新图片第一眼就能看到全图。极端拖拽时如需精确铺满，可通过
+     手动 resize 调整卡片纵横比让 wrap 与图片比例对齐。 */
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   object-position: center;
   display: block;
   pointer-events: none;

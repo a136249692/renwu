@@ -54,6 +54,10 @@ pub fn run() {
             list_mindmap_edges,
             add_mindmap_edge,
             delete_mindmap_edge,
+            list_map_node_images,
+            save_mindmap_node_image,
+            delete_mindmap_node_image,
+            read_mindmap_node_image,
             list_image_folders,
             create_image_folder,
             rename_image_folder,
@@ -64,6 +68,7 @@ pub fn run() {
             update_image_item,
             delete_image_item,
             read_image_file,
+            read_clipboard_image,
             create_backup,
             restore_backup
         ])
@@ -72,6 +77,25 @@ pub fn run() {
 }
 
 type DbState<'a> = tauri::State<'a, db::AppState>;
+
+/// 直接读取系统剪贴板里的图片（截图 / 从其它应用复制的图），以原始字节返回：
+/// 前 8 字节为小端 u32 的 width、height，其后是 RGBA8 像素（len = w*h*4）。
+/// 剪贴板里没有图片时返回空字节。前端画进 canvas 转成 PNG 再用。
+///
+/// 为什么需要它：部分 WebView（尤其 macOS WKWebView）不会把截图放进 paste 事件的
+/// clipboardData，前端拿不到图片，只能由这里直接向系统剪贴板要。
+#[tauri::command]
+fn read_clipboard_image() -> tauri::ipc::Response {
+    let mut payload: Vec<u8> = Vec::new();
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(img) = cb.get_image() {
+            payload.extend_from_slice(&(img.width as u32).to_le_bytes());
+            payload.extend_from_slice(&(img.height as u32).to_le_bytes());
+            payload.extend_from_slice(img.bytes.as_ref());
+        }
+    }
+    tauri::ipc::Response::new(payload)
+}
 
 #[tauri::command]
 fn storage_info(app: tauri::AppHandle) -> String {
@@ -264,9 +288,23 @@ fn update_mindmap_view(state: DbState, id: i64, pan_x: f64, pan_y: f64, zoom: f6
 }
 
 #[tauri::command]
-fn delete_mindmap(state: DbState, id: i64) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
-    db::delete_mindmap(&conn, id)
+fn delete_mindmap(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(), String> {
+    let (node_ids, rels) = {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        db::delete_mindmap(&conn, id)?
+    };
+    if let Ok(dir) = app_data_dir(&app) {
+        let root = db::images_root(&dir);
+        for rel in rels {
+            let _ = std::fs::remove_file(root.join(&rel));
+        }
+        for nid in node_ids {
+            let _ = std::fs::remove_dir(db::mindmap_image_dir(&dir, nid));
+        }
+        // 若已无任何节点图片，连 mindmap 根目录也一并收掉
+        let _ = std::fs::remove_dir(db::mindmap_image_root(&dir));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -300,9 +338,23 @@ fn update_mindmap_node_position(state: DbState, id: i64, x: f64, y: f64) -> Resu
 }
 
 #[tauri::command]
-fn delete_mindmap_node(state: DbState, id: i64) -> Result<(), String> {
-    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
-    db::delete_mindmap_node(&conn, id)
+fn delete_mindmap_node(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(), String> {
+    // 先取出该节点挂的所有图片相对路径，删完库记录后再清物理文件，
+    // 避免删节点后 images/mindmap/<node_id>/ 变成孤儿目录。
+    let rels = {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        let rels = db::delete_node_images(&conn, id)?;
+        db::delete_mindmap_node(&conn, id)?;
+        rels
+    };
+    if let Ok(dir) = app_data_dir(&app) {
+        let root = db::images_root(&dir);
+        for rel in rels {
+            let _ = std::fs::remove_file(root.join(&rel));
+        }
+        let _ = std::fs::remove_dir(db::mindmap_image_dir(&dir, id));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -321,6 +373,43 @@ fn add_mindmap_edge(state: DbState, map_id: i64, from_id: i64, to_id: i64) -> Re
 fn delete_mindmap_edge(state: DbState, id: i64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::delete_mindmap_edge(&conn, id)
+}
+
+#[tauri::command]
+fn list_map_node_images(state: DbState, map_id: i64) -> Result<Vec<db::MindmapNodeImage>, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::list_map_node_images(&conn, map_id)
+}
+
+/// 保存一张思维节点图片（节点内容块可挂多张）。
+#[tauri::command]
+fn save_mindmap_node_image(
+    app: tauri::AppHandle,
+    state: DbState,
+    node_id: i64,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<db::MindmapNodeImage, String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    let dir = app_data_dir(&app)?;
+    db::save_mindmap_node_image(&conn, &dir, node_id, &file_name, &data)
+}
+
+#[tauri::command]
+fn delete_mindmap_node_image(app: tauri::AppHandle, state: DbState, id: i64) -> Result<(), String> {
+    let rel = {
+        let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+        db::delete_mindmap_node_image(&conn, id)?
+    };
+    let dir = app_data_dir(&app)?;
+    let _ = std::fs::remove_file(db::images_root(&dir).join(&rel));
+    Ok(())
+}
+
+#[tauri::command]
+fn read_mindmap_node_image(app: tauri::AppHandle, file_path: String) -> Result<Vec<u8>, String> {
+    let dir = app_data_dir(&app)?;
+    db::read_mindmap_node_image(&dir, &file_path)
 }
 
 /// 取应用数据目录；图片文件与数据库都放在这里，便于整目录备份。

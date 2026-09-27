@@ -85,6 +85,17 @@ pub struct MindmapEdge {
     pub to_id: i64,
 }
 
+/// 思维节点里的一张图片。file_path 存相对 images/ 根的路径
+/// （形如 mindmap/<node_id>/<uuid>.png），便于整目录迁移。
+#[derive(Serialize)]
+pub struct MindmapNodeImage {
+    pub id: i64,
+    pub node_id: i64,
+    pub file_name: String,
+    pub file_path: String,
+    pub created_at: i64,
+}
+
 /// 图片夹：一个独立的图片墙画布（左侧可命名/切换，图片文件按夹归档到本地）
 #[derive(Serialize)]
 pub struct ImageFolder {
@@ -167,7 +178,15 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             from_id INTEGER NOT NULL,
             to_id INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS mindmap_node_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER NOT NULL REFERENCES mindmap_nodes(id) ON DELETE CASCADE,
+            file_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_mm_nodes_map ON mindmap_nodes(map_id);
+        CREATE INDEX IF NOT EXISTS idx_mm_node_images_node ON mindmap_node_images(node_id);
         CREATE TABLE IF NOT EXISTS image_folders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -708,15 +727,48 @@ pub fn update_mindmap_view(conn: &Connection, id: i64, pan_x: f64, pan_y: f64, z
     Ok(())
 }
 
-pub fn delete_mindmap(conn: &Connection, id: i64) -> Result<(), String> {
-    // 先清理该导图的连线与节点，避免遗留孤儿数据
+/// 删除导图。返回 (节点 id 列表, 节点图片相对路径列表)，
+/// 供命令层清理 images/mindmap/<node_id>/ 下的物理文件与目录。
+pub fn delete_mindmap(conn: &Connection, id: i64) -> Result<(Vec<i64>, Vec<String>), String> {
+    // 收集该导图下所有节点 id 与图片相对路径
+    let node_ids = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM mindmap_nodes WHERE map_id = ?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([id], |r| r.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    let rels = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT i.file_path FROM mindmap_node_images i
+                 JOIN mindmap_nodes n ON n.id = i.node_id WHERE n.map_id = ?1",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    // 先清理该导图的连线、节点图片与节点，避免遗留孤儿数据
+    conn.execute(
+        "DELETE FROM mindmap_node_images WHERE node_id IN (SELECT id FROM mindmap_nodes WHERE map_id = ?1)",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM mindmap_edges WHERE map_id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM mindmap_nodes WHERE map_id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM mindmaps WHERE id = ?1", rusqlite::params![id])
         .map_err(|e| e.to_string())?;
-    Ok(())
+    Ok((node_ids, rels))
 }
 
 // ---------- 思维导图节点 ----------
@@ -858,6 +910,116 @@ pub fn delete_mindmap_edge(conn: &Connection, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+// ---------- 思维节点图片 ----------
+
+/// 列出整张导图下所有节点的图片（一次查询，前端按 node_id 分组），
+/// 避免为每个节点各发一次 IPC。
+pub fn list_map_node_images(conn: &Connection, map_id: i64) -> Result<Vec<MindmapNodeImage>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT i.id, i.node_id, i.file_name, i.file_path, i.created_at
+             FROM mindmap_node_images i
+             JOIN mindmap_nodes n ON n.id = i.node_id
+             WHERE n.map_id = ?1 ORDER BY i.id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([map_id], |row| {
+            Ok(MindmapNodeImage {
+                id: row.get(0)?,
+                node_id: row.get(1)?,
+                file_name: row.get(2)?,
+                file_path: row.get(3)?,
+                created_at: row.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// 保存一张思维节点图片：先落盘到 images/mindmap/<node_id>/，再写库。
+/// 与 save_image 同样的失败回收策略：写库失败就删掉刚落盘的文件。
+pub fn save_mindmap_node_image(
+    conn: &Connection,
+    data_dir: &Path,
+    node_id: i64,
+    file_name: &str,
+    data: &[u8],
+) -> Result<MindmapNodeImage, String> {
+    if data.is_empty() {
+        return Err("图片数据为空".into());
+    }
+    let rel = format!("mindmap/{}/{}", node_id, file_name);
+    let abs = images_root(data_dir).join(&rel);
+    std::fs::create_dir_all(abs.parent().ok_or("图片目录异常")?)
+        .map_err(|e| format!("无法创建图片目录: {e}"))?;
+    std::fs::write(&abs, data).map_err(|e| format!("无法保存图片: {e}"))?;
+
+    let now = now_millis();
+    let result = conn.execute(
+        "INSERT INTO mindmap_node_images (node_id, file_name, file_path, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![node_id, file_name, rel, now],
+    );
+    match result {
+        Ok(_) => Ok(MindmapNodeImage {
+            id: conn.last_insert_rowid(),
+            node_id,
+            file_name: file_name.to_string(),
+            file_path: rel,
+            created_at: now,
+        }),
+        Err(e) => {
+            let _ = std::fs::remove_file(&abs);
+            Err(e.to_string())
+        }
+    }
+}
+
+/// 删除一张图片记录，返回其相对路径（调用方据此删物理文件）。
+pub fn delete_mindmap_node_image(conn: &Connection, id: i64) -> Result<String, String> {
+    let rel: String = conn
+        .query_row(
+            "SELECT file_path FROM mindmap_node_images WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "图片不存在".to_string())?;
+    conn.execute("DELETE FROM mindmap_node_images WHERE id = ?1", rusqlite::params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(rel)
+}
+
+/// 删除某个节点下所有图片记录，返回所有相对路径（用于删节点时清理文件）。
+pub fn delete_node_images(conn: &Connection, node_id: i64) -> Result<Vec<String>, String> {
+    let mut stmt = conn
+        .prepare("SELECT file_path FROM mindmap_node_images WHERE node_id = ?1")
+        .map_err(|e| e.to_string())?;
+    let rels = stmt
+        .query_map([node_id], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM mindmap_node_images WHERE node_id = ?1", rusqlite::params![node_id])
+        .map_err(|e| e.to_string())?;
+    Ok(rels)
+}
+
+/// 读取思维节点图片的原始字节（按相对路径定位，带目录穿越防护）。
+pub fn read_mindmap_node_image(data_dir: &Path, file_path: &str) -> Result<Vec<u8>, String> {
+    let abs = images_root(data_dir).join(file_path);
+    let abs_canonical = abs.canonicalize().map_err(|e| format!("图片不存在: {e}"))?;
+    let base = mindmap_image_root(data_dir)
+        .canonicalize()
+        .map_err(|e| format!("图片目录不存在: {e}"))?;
+    if !abs_canonical.starts_with(&base) {
+        return Err("非法的图片路径".into());
+    }
+    std::fs::read(&abs_canonical).map_err(|e| format!("无法读取图片: {e}"))
+}
+
 // ---------- 图片墙 ----------
 
 /// 图片文件统一归档在 <app_data>/images/<folder_id>/ 下，与数据库同级，
@@ -868,6 +1030,16 @@ pub fn images_root(data_dir: &Path) -> PathBuf {
 
 pub fn folder_image_dir(data_dir: &Path, folder_id: i64) -> PathBuf {
     images_root(data_dir).join(folder_id.to_string())
+}
+
+/// 思维节点图片的根目录：images/mindmap/。与图片夹目录平级，互不混淆。
+pub fn mindmap_image_root(data_dir: &Path) -> PathBuf {
+    images_root(data_dir).join("mindmap")
+}
+
+/// 单个思维节点的图片目录：images/mindmap/<node_id>/
+pub fn mindmap_image_dir(data_dir: &Path, node_id: i64) -> PathBuf {
+    mindmap_image_root(data_dir).join(node_id.to_string())
 }
 
 pub fn list_image_folders(conn: &Connection) -> Result<Vec<ImageFolder>, String> {

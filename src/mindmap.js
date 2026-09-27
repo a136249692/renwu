@@ -24,11 +24,17 @@ async function mi(cmd, args) {
   }
   return null;
 }
+/* 严格版：Tauri 端错误直接抛出（用于保存图片等需要暴露真实失败原因的场景）。 */
+async function miStrict(cmd, args) {
+  if (isTauri()) return await invokeImpl(cmd, args);
+  return null;
+}
 
 /* ---------- localStorage 兜底 ---------- */
 const LS_MAPS = "glassCanvas.mindmaps";
 const LS_NODES = "glassCanvas.mindNodes";
 const LS_EDGES = "glassCanvas.mindEdges";
+const LS_NODE_IMGS = "glassCanvas.mindNodeImgs";   // 思维节点图片元数据（浏览器兜底）
 const LS_MAP_ORDER = "glassCanvas.mindOrder";   // { mapId: 0..n-1 } 手动排序
 function lsLoadOrder() {
   try { return JSON.parse(localStorage.getItem(LS_MAP_ORDER) || "{}"); } catch { return {}; }
@@ -41,7 +47,31 @@ function lsSaveOf(key, arr) { try { localStorage.setItem(key, JSON.stringify(arr
 let lsMaps = lsLoadOf(LS_MAPS);
 let lsNodesArr = lsLoadOf(LS_NODES);
 let lsEdgesArr = lsLoadOf(LS_EDGES);
+let lsNodeImgs = lsLoadOf(LS_NODE_IMGS);
 let _lsIdSeq = 0;
+
+/* toast 反馈：复用与 main.js / image-wall.js 同一套 DOM 节点（#app-toast） */
+let _toastTimer = null;
+function toast(msg, ms) {
+  let t = document.getElementById("app-toast");
+  if (!t) { t = document.createElement("div"); t.id = "app-toast"; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => t.classList.remove("show"), ms || 3000);
+}
+function guessMime(p) {
+  const ext = (String(p).split(".").pop() || "").toLowerCase();
+  return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", avif: "image/avif" }[ext]) || "application/octet-stream";
+}
+function bytesToBase64(u8) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < u8.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, u8.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
 
 /* ---------- 工具 ---------- */
 function esc(s) {
@@ -79,6 +109,19 @@ const mindWorld = $("mind-world");
 const mindEdgesSvg = $("mind-edges");
 const mindNodesWrap = $("mind-nodes");
 const mindEmpty = $("mind-empty");
+const mindImageInput = $("mind-image-input");
+const mindLightbox = $("mind-lightbox");
+const mindLightboxStage = $("mind-lightbox-stage");
+const mindLightboxImg = $("mind-lightbox-img");
+const mindLightboxClose = $("mind-lightbox-close");
+const mindLightboxBackdrop = $("mind-lightbox-backdrop");
+const mindLightboxZoomIn = $("mind-lightbox-zoom-in");
+const mindLightboxZoomOut = $("mind-lightbox-zoom-out");
+const mindLightboxZoomLabel = $("mind-lightbox-zoom-label");
+const mindLightboxReset = $("mind-lightbox-reset");
+const mindLightboxPrev = $("mind-lightbox-prev");
+const mindLightboxNext = $("mind-lightbox-next");
+const mindLightboxCount = $("mind-lightbox-count");
 
 /* ---------- 状态 ---------- */
 let mode = "tasks";          // tasks | mind
@@ -98,6 +141,28 @@ let connectingPort = null;   // { node, x, y } 连线起点
 let tempEdgeEl = null;       // 临时连线 <path>
 let drag = null;               // 当前拖拽/平移会话
 let _viewTimer = null;         // 视野防抖保存定时器
+
+/* 节点图片状态 */
+const nodeImages = new Map();  // nodeId -> [{ id, node_id, file_name, file_path }]
+const expandedImgs = new Set();// 处于「展开画廊」状态的 nodeId
+const imgUrlCache = new Map(); // file_path -> objectURL/dataURL（或正在读取的 Promise）
+let _pendingImgNodeId = null;  // 文件选择框当前要写入的目标节点
+/* 思维块图片剪贴板：复制/剪切后可到其它思维块粘贴（Ctrl+V 或点「粘贴」）。
+   bytes 提前读出，粘贴时不再依赖源图片/源节点是否还在。 */
+let _mindClip = null;          // { mode:"copy"|"cut", nodeId, items:[{ id, node_id, file_name, file_path, bytes }] }
+let _sawPasteEvent = false;    // Ctrl/⌘+V 时 paste 事件是否已到达（用于键盘兜底判定）
+let _vFallbackTimer = null;    // 键盘兜底的延迟定时器
+/* 应用内跨模块图片剪贴板桥：图片夹「复制 / 剪切」后会把快照挂到 window.__glassImgClip，
+   思维块粘贴时（系统剪贴板里没有图片）也能取用它——这样在图片夹里复制的图也能贴进思维块。 */
+const SHARED_CLIP_KEY = "__glassImgClip";
+function readSharedClip() {
+  try {
+    const c = window[SHARED_CLIP_KEY];
+    return (c && Array.isArray(c.items) && c.items.length) ? c : null;
+  } catch { return null; }
+}
+/* list / index：灯箱当前围绕的图片集合与下标，用于多图左右切换 */
+let lb = { scale: 1, tx: 0, ty: 0, dragging: false, moved: false, list: [], index: 0 };
 
 const NODE_W = 210;
 const MIN_ZOOM = 0.25, MAX_ZOOM = 2.5;
@@ -206,6 +271,10 @@ async function apiDeleteNode(id) {
   edges = edges.filter(e => e.from_id !== id && e.to_id !== id);
   lsNodesArr = lsNodesArr.filter(n => n.id !== id); lsSaveOf(LS_NODES, lsNodesArr);
   lsEdgesArr = lsEdgesArr.filter(e => e.from_id !== id && e.to_id !== id); lsSaveOf(LS_EDGES, lsEdgesArr);
+  // 同步清掉该节点在浏览器兜底里的图片（含 dataURL），Tauri 端由命令层删文件
+  const orphans = lsNodeImgs.filter(im => im.node_id === id);
+  for (const im of orphans) { try { localStorage.removeItem(`glassCanvas.mindImg.${im.file_path}`); } catch {} }
+  lsNodeImgs = lsNodeImgs.filter(im => im.node_id !== id); lsSaveOf(LS_NODE_IMGS, lsNodeImgs);
 }
 async function apiListEdges(mapId) {
   const r = await mi("list_mindmap_edges", { mapId });
@@ -228,6 +297,111 @@ async function apiDeleteEdge(id) {
   if (isTauri()) await mi("delete_mindmap_edge", { id });
   edges = edges.filter(e => e.id !== id);
   lsEdgesArr = lsEdgesArr.filter(e => e.id !== id); lsSaveOf(LS_EDGES, lsEdgesArr);
+}
+
+/* ---------- 思维节点图片 API（SQLite 优先，localStorage 兜底） ---------- */
+async function apiListMapImages(mapId) {
+  const r = await mi("list_map_node_images", { mapId });
+  if (r) return r;
+  const ids = new Set(lsNodesArr.filter(n => n.map_id === mapId).map(n => n.id));
+  return lsNodeImgs.filter(im => ids.has(im.node_id)).map(im => ({ ...im }));
+}
+async function apiSaveNodeImage(nodeId, fileName, data) {
+  if (isTauri()) {
+    // 用 miStrict：保存失败要抛出真实错误，而不是被吞成 null 让用户查不出原因。
+    return await miStrict("save_mindmap_node_image", {
+      nodeId,
+      fileName,
+      data: Array.from(data, b => b & 0xff),
+    });
+  }
+  const id = (_lsIdSeq--);
+  const im = { id, node_id: nodeId, file_name: fileName, file_path: `mindmap/${nodeId}/${fileName}`, created_at: nowTs() };
+  lsNodeImgs.push(im); lsSaveOf(LS_NODE_IMGS, lsNodeImgs);
+  const mime = guessMime(fileName);
+  try { localStorage.setItem(`glassCanvas.mindImg.${im.file_path}`, `data:${mime};base64,` + bytesToBase64(data)); }
+  catch (e) { console.warn("[思维导图] localStorage 保存图片失败（可能超出配额）:", e); }
+  return im;
+}
+async function apiDeleteNodeImage(id) {
+  if (isTauri()) await mi("delete_mindmap_node_image", { id });
+  const im = lsNodeImgs.find(x => x.id === id);
+  if (im) {
+    try { localStorage.removeItem(`glassCanvas.mindImg.${im.file_path}`); } catch {}
+    lsNodeImgs = lsNodeImgs.filter(x => x.id !== id); lsSaveOf(LS_NODE_IMGS, lsNodeImgs);
+  }
+}
+async function apiReadNodeImage(filePath) {
+  if (isTauri()) {
+    const bytes = await mi("read_mindmap_node_image", { filePath });
+    if (!bytes) return null;
+    const u8 = new Uint8Array(bytes);
+    return URL.createObjectURL(new Blob([u8], { type: guessMime(filePath) }));
+  }
+  try { return localStorage.getItem(`glassCanvas.mindImg.${filePath}`) || null; } catch { return null; }
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+/* 读取图片原始字节（复制/剪切到剪贴板时用；与 apiReadNodeImage 的区别是不转成 URL） */
+async function apiReadNodeImageBytes(filePath) {
+  if (isTauri()) {
+    const bytes = await mi("read_mindmap_node_image", { filePath });
+    return bytes ? new Uint8Array(bytes) : null;
+  }
+  const url = await apiReadNodeImage(filePath);
+  if (!url) return null;
+  const b64 = url.includes(",") ? url.slice(url.indexOf(",") + 1) : url;
+  try { return base64ToBytes(b64); } catch { return null; }
+}
+/* 把 RGBA8 原始像素画进 canvas 再转成 PNG File（供剪贴板兜底用） */
+async function rgbaToPngFile(rgba, width, height) {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    const data = ctx.createImageData(width, height);
+    data.data.set(rgba);
+    ctx.putImageData(data, 0, 0);
+    const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+    if (!blob) return null;
+    return new File([blob], `clipboard-${Date.now()}.png`, { type: "image/png" });
+  } catch (e) { console.warn("[思维导图] 剪贴板图片转 PNG 失败:", e); return null; }
+}
+/* 直接向后端要一张系统剪贴板图片，返回 PNG File 或 null。
+   后端返回的二进制前 8 字节是小端 u32 的 width/height，其后为 RGBA8 像素。
+   用于兜底「WebView 没把截图塞进 paste 事件」的场景（尤其 macOS WKWebView）。 */
+async function apiReadClipboardImage() {
+  if (!isTauri()) return null;
+  let buf = null;
+  try { buf = await invokeImpl("read_clipboard_image"); }
+  catch (e) { console.warn("[思维导图] 读取系统剪贴板图片失败:", e); return null; }
+  if (!buf) return null;
+  const u8 = buf instanceof ArrayBuffer ? new Uint8Array(buf) : new Uint8Array(buf.buffer || buf);
+  if (u8.length <= 8) return null;
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const width = dv.getUint32(0, true);
+  const height = dv.getUint32(4, true);
+  if (!width || !height || u8.byteLength < 8 + width * height * 4) return null;
+  return rgbaToPngFile(new Uint8Array(u8.buffer, u8.byteOffset + 8, width * height * 4), width, height);
+}
+/* 图片 URL 缓存：node 会频繁重渲染，缓存避免重复读盘；并发时先用 Promise 占位。 */
+function nodeImageUrl(im) {
+  const key = im.file_path;
+  if (imgUrlCache.has(key)) return imgUrlCache.get(key);
+  const p = apiReadNodeImage(key)
+    .then(u => { imgUrlCache.set(key, u); return u; })
+    .catch(() => { imgUrlCache.set(key, null); return null; });
+  imgUrlCache.set(key, p);
+  return p;
+}
+function releaseImgUrl(filePath) {
+  const u = imgUrlCache.get(filePath);
+  if (u && typeof u === "string" && u.startsWith("blob:")) { try { URL.revokeObjectURL(u); } catch {} }
+  imgUrlCache.delete(filePath);
 }
 
 /* ═══════════ 模式切换 ═══════════ */
@@ -528,6 +702,7 @@ async function setActiveMap(id) {
   activeMapId = id;
   activeMap = id != null ? (maps.find(m => m.id === id) || null) : null;
   selectedNodeId = null; selectedEdgeId = null; editingNode = null;
+  clearMindImages();
   renderMapList();
   if (!activeMap) {
     nodes = []; edges = []; renderMindCanvas();
@@ -540,8 +715,23 @@ async function setActiveMap(id) {
     nodes = await apiListNodes(id);
     edges = await apiListEdges(id);
   } catch { nodes = []; edges = []; }
+  try { loadNodeImages(await apiListMapImages(id)); } catch {}
   renderMindHeader();
   renderMindCanvas();
+}
+/* 把扁平图片列表按 node_id 归组到 nodeImages */
+function loadNodeImages(list) {
+  nodeImages.clear();
+  for (const im of (list || [])) {
+    if (!nodeImages.has(im.node_id)) nodeImages.set(im.node_id, []);
+    nodeImages.get(im.node_id).push(im);
+  }
+}
+/* 切换导图时清空节点图片相关状态与已缓存的 blob URL */
+function clearMindImages() {
+  nodeImages.clear();
+  expandedImgs.clear();
+  for (const key of Array.from(imgUrlCache.keys())) releaseImgUrl(key);
 }
 function renderMindHeader() {
   mindTitle.textContent = activeMap ? activeMap.name : "思维导图";
@@ -572,7 +762,7 @@ function renderMindCanvas() {
   renderEdges();
   // 空状态提示
   if (nodes.length === 0) {
-    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖节点任意位置移动 · 单击文字编辑<br/>悬停节点显示连接点，从连接点拖到另一节点连线`;
+    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖节点任意位置移动 · 单击文字编辑<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
     mindEmpty.hidden = false;
   } else {
     mindEmpty.hidden = true;
@@ -590,10 +780,136 @@ function makeNodeEl(n) {
     `<div class="mind-port port-bottom" data-side="bottom"></div>` +
     `<div class="mind-port port-left" data-side="left"></div>` +
     `<div class="mind-node-body" contenteditable="false" spellcheck="false">${esc(n.content)}</div>` +
+    `<div class="mind-node-imgs" hidden></div>` +
     `<button class="rm-node" title="删除节点">×</button>`;
   nodeEls.set(n.id, el);
   bindNodeEvents(el, n);
+  renderNodeImages(n, el);
   return el;
+}
+
+/* ---------- 节点图片渲染 ---------- */
+/* 思维图片不支持「下载 / 另存为」：关掉原生右键菜单（WebView 的「图片另存为/下载图片」），
+   同时禁止把图拖出去保存——避免误存一份到系统里。复制/剪切用悬停操作条即可。 */
+function forbidImageDownload(imgEl) {
+  if (!imgEl) return;
+  imgEl.draggable = false;
+  imgEl.addEventListener("contextmenu", e => e.preventDefault());
+  imgEl.addEventListener("dragstart", e => e.preventDefault());
+}
+/* 折叠态：一张封面缩略图 + 张数角标（点击展开）。
+   展开态：一行多列横向画廊（点击单张进灯箱缩放查看）。
+   无图时只显示「＋ 图片」按钮，让用户随时为该内容块补充图片。 */
+function renderNodeImages(n, el) {
+  if (!el) return;
+  const wrap = el.querySelector(".mind-node-imgs");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  const list = nodeImages.get(n.id) || [];
+  wrap.hidden = false;
+
+  if (list.length === 0) {
+    const bar = document.createElement("div");
+    bar.className = "mind-node-img-bar";
+    bar.appendChild(makeAddImgBtn(n.id, "🖼 ＋ 图片"));
+    appendPasteBtn(bar, n.id);
+    wrap.appendChild(bar);
+    return;
+  }
+
+  const expanded = expandedImgs.has(n.id);
+  if (!expanded) {
+    // 折叠：封面缩略图 + 计数
+    const cover = document.createElement("div");
+    cover.className = "mind-node-cover";
+    cover.title = `共 ${list.length} 张 · 点击展开查看`;
+    const img = document.createElement("img");
+    img.alt = "";
+    forbidImageDownload(img);
+    applyThumbSrc(img, list[0]);
+    cover.appendChild(img);
+    const cnt = document.createElement("span");
+    cnt.className = "cover-count";
+    cnt.textContent = String(list.length);
+    cover.appendChild(cnt);
+    const doExpand = e => { e.stopPropagation(); expandedImgs.add(n.id); renderNodeImages(n, el); renderEdges(); };
+    cover.addEventListener("click", doExpand);
+    wrap.appendChild(cover);
+
+    const toggle = document.createElement("button");
+    toggle.className = "mind-node-img-toggle";
+    toggle.textContent = `展开 ${list.length} 张 ▸`;
+    toggle.addEventListener("click", doExpand);
+    wrap.appendChild(toggle);
+    const bar = document.createElement("div");
+    bar.className = "mind-node-img-bar";
+    bar.appendChild(makeAddImgBtn(n.id, "＋ 图片"));
+    appendPasteBtn(bar, n.id);
+    wrap.appendChild(bar);
+    return;
+  }
+
+  // 展开：一行多列
+  const gallery = document.createElement("div");
+  gallery.className = "mind-node-gallery";
+  for (const im of list) {
+    const thumb = document.createElement("div");
+    thumb.className = "mind-node-thumb";
+    thumb.title = "点击放大查看";
+    const img = document.createElement("img");
+    img.alt = "";
+    forbidImageDownload(img);
+    applyThumbSrc(img, im);
+    thumb.appendChild(img);
+    const del = document.createElement("button");
+    del.className = "thumb-del";
+    del.textContent = "×";
+    del.title = "移除这张图片";
+    del.addEventListener("click", e => { e.stopPropagation(); removeNodeImage(n, im); });
+    thumb.appendChild(del);
+    // 悬停操作条：复制 / 剪切到其它思维块
+    const acts = document.createElement("div");
+    acts.className = "thumb-acts";
+    const cp = document.createElement("button");
+    cp.className = "thumb-act";
+    cp.textContent = "⧉";
+    cp.title = "复制到其它思维块";
+    cp.addEventListener("click", e => { e.stopPropagation(); copyNodeImage(n, im, "copy"); });
+    const ct = document.createElement("button");
+    ct.className = "thumb-act";
+    ct.textContent = "✂";
+    ct.title = "剪切到其它思维块";
+    ct.addEventListener("click", e => { e.stopPropagation(); copyNodeImage(n, im, "cut"); });
+    acts.appendChild(cp);
+    acts.appendChild(ct);
+    thumb.appendChild(acts);
+    thumb.addEventListener("click", e => { e.stopPropagation(); openLightbox(im, list); });
+    gallery.appendChild(thumb);
+  }
+  wrap.appendChild(gallery);
+
+  const toggle = document.createElement("button");
+  toggle.className = "mind-node-img-toggle";
+  toggle.textContent = "收起 ▾";
+  toggle.addEventListener("click", e => { e.stopPropagation(); expandedImgs.delete(n.id); renderNodeImages(n, el); renderEdges(); });
+  wrap.appendChild(toggle);
+  const bar = document.createElement("div");
+  bar.className = "mind-node-img-bar";
+  bar.appendChild(makeAddImgBtn(n.id, "＋ 图片"));
+  appendPasteBtn(bar, n.id);
+  wrap.appendChild(bar);
+}
+function makeAddImgBtn(nodeId, label) {
+  const add = document.createElement("button");
+  add.className = "mind-node-add-img";
+  add.textContent = label;
+  add.title = "给这个思维块添加图片（可多选）";
+  add.addEventListener("click", e => { e.stopPropagation(); pickImagesForNode(nodeId); });
+  return add;
+}
+async function applyThumbSrc(imgEl, im) {
+  const u = await nodeImageUrl(im);
+  if (u && imgEl.isConnected) imgEl.src = u;
 }
 
 /* ---------- 节点事件 ---------- */
@@ -616,11 +932,270 @@ function bindNodeEvents(el, n) {
   });
 }
 async function removeNode(id) {
+  const n = nodes.find(x => x.id === id);
+  const label = (n && String(n.content || "").trim()) ? esc(n.content.trim().replace(/\s+/g, " ").slice(0, 24)) : "";
+  const ok = await askConfirm(
+    `确定删除思维块${label ? `「<b>${label}</b>」` : ""}吗？<br/>其挂载的图片与相关连线将一并删除，此操作不可撤销。`,
+    { title: "删除思维块", okText: "删除" }
+  );
+  if (!ok) return;
   if (selectedNodeId === id) selectedNodeId = null;
   if (editingNode && editingNode.id === id) editingNode = null;
+  if (nodeImages.has(id)) { for (const im of nodeImages.get(id)) releaseImgUrl(im.file_path); nodeImages.delete(id); }
+  expandedImgs.delete(id);
   await apiDeleteNode(id);   // 后端同步级联删除相关连线，API 内部会清理内存状态
   renderMindCanvas();
   renderMindHeader();
+}
+
+/* ---------- 节点图片：增删 ---------- */
+function pickImagesForNode(nodeId) {
+  if (!mindImageInput) return;
+  _pendingImgNodeId = nodeId;
+  mindImageInput.value = "";
+  mindImageInput.click();
+}
+async function addImagesToNode(nodeId, files) {
+  if (!files || !files.length) return 0;
+  let ok = 0;
+  for (const file of files) {
+    if (!file) continue;
+    if (file.type && !/^image\//.test(file.type)) continue;
+    if (!file.size) { toast("添加失败：图片为空", 3000); continue; }
+    if (file.size > 30 * 1024 * 1024) { toast(`添加失败：图片过大（${(file.size / 1024 / 1024).toFixed(1)}MB，限制 30MB）`, 4000); continue; }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const ext = (file.name.split(".").pop() || (file.type.split("/")[1] || "png")).replace(/[^a-z0-9]/gi, "").toLowerCase() || "png";
+      const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+      const im = await apiSaveNodeImage(nodeId, fileName, bytes);
+      if (!im) { toast("添加失败：后端未返回图片信息", 3500); continue; }
+      if (!nodeImages.has(nodeId)) nodeImages.set(nodeId, []);
+      nodeImages.get(nodeId).push(im);
+      ok++;
+    } catch (e) {
+      console.warn("[思维导图] 添加图片失败:", e);
+      toast("添加失败：" + (e.message || String(e)).slice(0, 60), 3500);
+    }
+  }
+  if (!ok) return 0;
+  const n = nodes.find(x => x.id === nodeId);
+  const el = nodeEls.get(nodeId);
+  expandedImgs.add(nodeId);   // 添加后自动展开，便于立刻看到刚加的图
+  if (n && el) { renderNodeImages(n, el); renderEdges(); }
+  toast(`已添加 ${ok} 张图片`);
+  return ok;
+}
+async function removeNodeImage(n, im) {
+  const ok = await askConfirm(
+    `确定删除这张图片吗？<br/>删除后不可撤销。`,
+    { title: "删除图片", okText: "删除" }
+  );
+  if (!ok) return;
+  try { await apiDeleteNodeImage(im.id); } catch (e) { console.warn("[思维导图] 移除图片失败:", e); }
+  const list = nodeImages.get(n.id) || [];
+  nodeImages.set(n.id, list.filter(x => x.id !== im.id));
+  releaseImgUrl(im.file_path);
+  const el = nodeEls.get(n.id);
+  if (el) { renderNodeImages(n, el); renderEdges(); }
+  toast("已移除图片", 2000);
+}
+
+/* ---------- 节点图片：复制 / 剪切 / 粘贴（跨思维块） ----------
+   语义与图片夹一致：复制/剪切先把图片「快照」（含字节）存进内存剪贴板，
+   剪切仅打标记、不动源图，真正的删除发生在粘贴成功之后——这样中途取消
+   或贴错地方都不会丢数据。 */
+async function copyNodeImage(n, im, mode) {
+  const bytes = await apiReadNodeImageBytes(im.file_path);
+  if (!bytes || !bytes.length) { toast("操作失败：无法读取图片数据", 3200); return; }
+  _mindClip = {
+    mode,
+    nodeId: n.id,
+    items: [{ id: im.id, node_id: im.node_id, file_name: im.file_name, file_path: im.file_path, bytes }],
+  };
+  refreshAllNodeImages();   // 各节点出现「粘贴」按钮
+  toast(mode === "cut" ? "已剪切 1 张 —— 到目标思维块按 Ctrl+V 或点「粘贴」"
+                       : "已复制 1 张 —— 到目标思维块按 Ctrl+V 或点「粘贴」", 3600);
+}
+/* 把剪贴板里的图片贴入目标思维块；剪切模式下成功后再删除源图。 */
+async function pasteNodeImages(targetNodeId) {
+  if (!_mindClip || !_mindClip.items.length) { toast("剪贴板为空：请先复制或剪切一张图片", 3000); return; }
+  const isCut = _mindClip.mode === "cut";
+  const items = _mindClip.items;
+  const files = items.map(it => new File([it.bytes], it.file_name, { type: guessMime(it.file_name) }));
+  const ok = await addImagesToNode(targetNodeId, files);
+  if (!isCut || !ok) return;   // 复制模式保留剪贴板；剪切但没贴成功也不动源图
+  // 剪切：粘贴成功后删除源图，并刷新源节点
+  for (const it of items) {
+    const srcNode = nodes.find(x => x.id === it.node_id);
+    const srcIm = (nodeImages.get(it.node_id) || []).find(x => x.id === it.id);
+    if (!srcNode || !srcIm) continue;   // 源节点/源图已不存在则跳过
+    try { await apiDeleteNodeImage(it.id); } catch (e) { console.warn("[思维导图] 剪切后删除源图失败:", e); }
+    nodeImages.set(it.node_id, (nodeImages.get(it.node_id) || []).filter(x => x.id !== it.id));
+    releaseImgUrl(srcIm.file_path);
+    const el = nodeEls.get(it.node_id);
+    if (el) renderNodeImages(srcNode, el);
+  }
+  _mindClip = null;   // 剪切语义：粘贴后清空剪贴板
+  refreshAllNodeImages();
+  renderEdges();
+}
+/* 贴入「应用内共享剪贴板」里的图片（例如在图片夹复制的图）。
+   剪切模式：贴成功后回调源模块的 onConsume 删除源图，再清空共享剪贴板。 */
+async function pasteSharedImages(targetNodeId) {
+  const c = readSharedClip();
+  if (!c) { toast("剪贴板为空：请先复制或剪切一张图片", 3000); return; }
+  const files = c.items.map(it => {
+    const name = it.name || it.file_name || "clipboard.png";
+    return new File([it.bytes], name, { type: guessMime(name) });
+  });
+  const ok = await addImagesToNode(targetNodeId, files);
+  if (!ok) return;   // 没贴成功就不清理源，避免丢数据
+  if (c.mode === "cut" && typeof c.onConsume === "function") {
+    try { await c.onConsume(); } catch (e) { console.warn("[思维导图] 跨模块剪切清理源图失败:", e); }
+  }
+  if (c.mode === "cut") { try { window[SHARED_CLIP_KEY] = null; } catch {} }
+}
+/* 剪贴板有内容时，为图片操作条追加「粘贴」按钮 */
+function appendPasteBtn(bar, nodeId) {
+  if (!_mindClip || !_mindClip.items.length) return;
+  const btn = document.createElement("button");
+  btn.className = "mind-node-paste-img";
+  btn.textContent = _mindClip.mode === "cut" ? "📋 粘贴（剪切）" : "📋 粘贴";
+  btn.title = "把复制的图片粘贴到这个思维块（Ctrl+V）";
+  btn.addEventListener("click", e => { e.stopPropagation(); pasteNodeImages(nodeId); });
+  bar.appendChild(btn);
+}
+/* 重渲染所有节点的图片区（复制/剪切后「粘贴」按钮显隐需要全局刷新） */
+function refreshAllNodeImages() {
+  for (const n of nodes) {
+    const el = nodeEls.get(n.id);
+    if (el) renderNodeImages(n, el);
+  }
+}
+
+/* ---------- 图片灯箱（缩放查看 + 多图切换） ---------- */
+/* 打开灯箱：list 为同一思维块内的全部图片，用于左右切换查看。 */
+async function openLightbox(im, list) {
+  const arr = (Array.isArray(list) && list.length) ? list.slice() : [im];
+  let idx = arr.findIndex(x => x.id === im.id);
+  if (idx < 0) { arr.push(im); idx = arr.length - 1; }
+  lb.list = arr;
+  lb.index = idx;
+  mindLightbox.hidden = false;
+  await showLightboxImage(idx);
+}
+/* 展示第 i 张（下标循环）。切换时重置缩放/平移，避免上一张的变换残留。 */
+async function showLightboxImage(i) {
+  const arr = lb.list;
+  if (!arr.length) return;
+  const n = arr.length;
+  lb.index = ((i % n) + n) % n;
+  const im = arr[lb.index];
+  const url = await nodeImageUrl(im);
+  if (mindLightbox.hidden) return;            // 读取期间灯箱被关闭
+  if (!url) { toast("图片读取失败", 3000); return; }
+  mindLightboxImg.src = url;
+  lb.scale = 1; lb.tx = 0; lb.ty = 0; lb.dragging = false; lb.moved = false;
+  applyLightboxTransform();
+  updateLightboxChrome();
+}
+/* 上一张 / 下一张（仅多图时有实际作用） */
+function lightboxStep(delta) {
+  if (mindLightbox.hidden || lb.list.length <= 1) return;
+  showLightboxImage(lb.index + delta);
+}
+/* 同步切换按钮显隐与「当前/总数」计数 */
+function updateLightboxChrome() {
+  const n = lb.list.length;
+  const multi = n > 1;
+  if (mindLightboxPrev) mindLightboxPrev.hidden = !multi;
+  if (mindLightboxNext) mindLightboxNext.hidden = !multi;
+  if (mindLightboxCount) {
+    mindLightboxCount.hidden = !multi;
+    mindLightboxCount.textContent = multi ? `${lb.index + 1} / ${n}` : "";
+  }
+}
+function closeLightbox() {
+  if (!mindLightbox || mindLightbox.hidden) return;
+  mindLightbox.hidden = true;
+  mindLightboxImg.removeAttribute("src");
+  lb = { scale: 1, tx: 0, ty: 0, dragging: false, moved: false, list: [], index: 0 };
+  updateLightboxChrome();
+}
+function applyLightboxTransform() {
+  mindLightboxImg.style.transform = `translate(${lb.tx}px, ${lb.ty}px) scale(${lb.scale})`;
+  if (mindLightboxZoomLabel) mindLightboxZoomLabel.textContent = Math.round(lb.scale * 100) + "%";
+}
+/* 以光标（clientX/clientY）为锚点缩放，非光标处调用则绕中心缩放 */
+function lightboxZoomAt(factor, clientX, clientY) {
+  const ns = Math.min(8, Math.max(0.2, lb.scale * factor));
+  if (ns === lb.scale) return;
+  if (clientX != null) {
+    const r = mindLightboxStage.getBoundingClientRect();
+    const px = clientX - (r.left + r.width / 2);
+    const py = clientY - (r.top + r.height / 2);
+    const k = ns / lb.scale;
+    lb.tx = px - k * (px - lb.tx);
+    lb.ty = py - k * (py - lb.ty);
+  }
+  lb.scale = ns;
+  if (lb.scale <= 1) { lb.tx = 0; lb.ty = 0; }
+  applyLightboxTransform();
+}
+function lightboxReset() { lb.scale = 1; lb.tx = 0; lb.ty = 0; applyLightboxTransform(); }
+function bindLightbox() {
+  if (!mindLightbox) return;
+  forbidImageDownload(mindLightboxImg);   // 灯箱里也不给「下载 / 另存为」
+  mindLightboxClose.addEventListener("click", closeLightbox);
+  mindLightboxBackdrop.addEventListener("click", closeLightbox);
+  mindLightboxZoomIn.addEventListener("click", () => lightboxZoomAt(1.2));
+  mindLightboxZoomOut.addEventListener("click", () => lightboxZoomAt(0.8333));
+  mindLightboxReset.addEventListener("click", lightboxReset);
+  if (mindLightboxPrev) mindLightboxPrev.addEventListener("click", e => { e.stopPropagation(); lightboxStep(-1); });
+  if (mindLightboxNext) mindLightboxNext.addEventListener("click", e => { e.stopPropagation(); lightboxStep(1); });
+  // 点击舞台空白处（非图片）关闭；拖拽平移后不误关
+  mindLightboxStage.addEventListener("click", e => {
+    if (e.target === mindLightboxStage && !lb.moved) closeLightbox();
+  });
+  // 滚轮缩放（以光标为锚点）
+  mindLightboxStage.addEventListener("wheel", e => {
+    if (mindLightbox.hidden) return;
+    e.preventDefault();
+    lightboxZoomAt(e.deltaY < 0 ? 1.15 : 0.8696, e.clientX, e.clientY);
+  }, { passive: false });
+  // 拖拽平移
+  mindLightboxStage.addEventListener("pointerdown", e => {
+    if (e.button !== 0) return;
+    lb.dragging = true; lb.moved = false;
+    const sx = e.clientX, sy = e.clientY, ox = lb.tx, oy = lb.ty;
+    mindLightboxStage.classList.add("dragging");
+    const onMove = ev => {
+      if (!lb.dragging) return;
+      const dx = ev.clientX - sx, dy = ev.clientY - sy;
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) lb.moved = true;
+      lb.tx = ox + dx; lb.ty = oy + dy;
+      applyLightboxTransform();
+    };
+    const onUp = () => {
+      lb.dragging = false;
+      mindLightboxStage.classList.remove("dragging");
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  });
+  document.addEventListener("keydown", e => {
+    if (mindLightbox.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeLightbox(); }
+    else if (e.key === "+" || e.key === "=") { e.preventDefault(); lightboxZoomAt(1.2); }
+    else if (e.key === "-") { e.preventDefault(); lightboxZoomAt(0.8333); }
+    else if (e.key === "0") { e.preventDefault(); lightboxReset(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); lightboxStep(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); lightboxStep(1); }
+  }, true);
 }
 
 /* ---------- 选择 / 编辑 ---------- */
@@ -664,6 +1239,8 @@ async function exitEdit(n, body) {
 function downOnNode(e, el, n) {
   if (e.button !== 0) return;
   e.stopPropagation();
+  // 图片区（封面/画廊/加图/删除按钮）交互不触发整节点拖动
+  if (e.target.closest(".mind-node-imgs")) return;
   // 正在编辑的节点：允许选择文字，不触发整节点拖动
   if (editingNode && editingNode.id === n.id && e.target.closest(".mind-node-body")) return;
   selectNode(n.id, el);
@@ -970,9 +1547,134 @@ function bindConfirm() {
     else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeConfirm(false); }
   }, true);
 }
+/* Ctrl/⌘+V：把剪贴板里的图片粘贴到当前选中的思维块。
+   图片来源优先级：系统剪贴板里的图片文件（截图 / 复制的图片文件）→ 剪贴板 HTML/URL 里的图片
+   （从网页或其它 App 复制）→ 系统剪贴板 API 兜底 → 应用内共享剪贴板（图片夹里复制/剪切的图）。
+   全都没有时不拦截，正常走默认粘贴（例如在编辑文字时粘贴文本）。 */
+function bindImagePaste() {
+  document.addEventListener("paste", async e => {
+    _sawPasteEvent = true;   // 标记：本次 Ctrl/⌘+V 已经被 paste 事件接管（不再走键盘兜底）
+    if (mindPane.hidden || !activeMap) return;
+    if (mindLightbox && !mindLightbox.hidden) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
+    const cd = e.clipboardData;
+    const files = [];
+    for (const it of Array.from((cd && cd.items) || [])) {
+      if (it.kind === "file" && it.type && /^image\//i.test(it.type)) {
+        const f = it.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    // 复制自网页/其它应用的图片常常只出现在 HTML/URL 里，或干脆没进 paste 事件，逐个兜底。
+    if (!files.length) files.push(...await clipboardImageFallbacks(cd));
+    // 正在编辑文字、且剪贴板里是纯文本时，让浏览器默认粘贴生效——
+    // 否则应用内图片剪贴板会「抢走」本该粘贴进去的文字。
+    const plainText = (cd && cd.getData ? cd.getData("text/plain") : "") || "";
+    const editingText = !!editingNode || !!(ae && ae.isContentEditable);
+    if (!files.length && plainText.trim() && editingText) return;
+    const hasInternal = !!(_mindClip && _mindClip.items.length);
+    const hasShared = !!readSharedClip();
+    if (!files.length && !hasInternal && !hasShared) return;   // 非图片粘贴：不打扰默认行为
+    e.preventDefault();
+    // 正在编辑文字时优先写入被编辑的节点，否则写入当前选中节点
+    const targetId = editingNode ? editingNode.id : selectedNodeId;
+    if (targetId == null) { toast("请先选中一个思维块，再粘贴图片", 3200); return; }
+    if (files.length) await addImagesToNode(targetId, files);
+    else if (hasInternal) await pasteNodeImages(targetId);
+    else await pasteSharedImages(targetId);
+  });
+  // 键盘兜底：个别 WebView（如 macOS WKWebView）在剪贴板里只有图片时可能「不派发 paste 事件」，
+  // 这样上面的剪贴板兜底也就无从谈起。这里在按下 Ctrl/⌘+V 后延迟检查一次：
+  // 若 paste 事件始终没来，就直接向后端要系统剪贴板里的图片贴进当前节点。
+  document.addEventListener("keydown", e => {
+    if (mindPane.hidden || !activeMap) return;
+    if ((e.key !== "v" && e.key !== "V") || !(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+    _sawPasteEvent = false;
+    if (_vFallbackTimer) clearTimeout(_vFallbackTimer);
+    _vFallbackTimer = setTimeout(() => { if (!_sawPasteEvent) fallbackPasteClipboardImage(); }, 180);
+  });
+}
+/* 键盘兜底的实际动作：把系统剪贴板图片贴进当前编辑/选中的节点（仅桌面端）。 */
+async function fallbackPasteClipboardImage() {
+  if (!isTauri()) return;
+  const targetId = editingNode ? editingNode.id : selectedNodeId;
+  if (targetId == null) return;
+  const f = await apiReadClipboardImage();
+  if (f) await addImagesToNode(targetId, [f]);
+}
+/* 解析剪贴板 HTML：取出 <img src> 与可见文字。
+   只有「HTML 里没有可见文字」时才把它当图片粘贴，避免把含图片的文字选区误当图片。 */
+function parseClipboardHtml(html) {
+  const srcs = [];
+  let text = "";
+  try {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll("img[src]").forEach(im => { const s = im.getAttribute("src"); if (s) srcs.push(s); });
+    text = doc.body ? doc.body.textContent : "";
+  } catch { /* 解析失败就当没有 */ }
+  return { srcs, text };
+}
+function isImageUrl(s) {
+  if (!s) return false;
+  if (/^blob:/i.test(s) || /^data:image\//i.test(s)) return true;
+  return /^https?:\/\//i.test(s) && /\.(png|jpe?g|gif|webp|bmp|svg|avif)(\?|#|$)/i.test(s);
+}
+/* 把剪贴板里的一段图片来源（data: / blob: / http(s)）取成 File；跨域或非图片返回 null。 */
+async function urlToImageFile(src) {
+  if (!src) return null;
+  const schemeOk = /^https?:/i.test(src) || /^blob:/i.test(src) || /^data:image\//i.test(src);
+  if (!schemeOk) return null;
+  try {
+    const res = await fetch(src);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const type = blob.type || guessMime(src);
+    if (!/^image\//i.test(type)) return null;
+    const ext = (type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "").slice(0, 5) || "png";
+    return new File([blob], `clipboard.${ext}`, { type });
+  } catch { return null; }
+}
+/* paste 事件里没有图片文件时的兜底：HTML → URL/纯文本 → navigator.clipboard.read()。
+   纯文本粘贴（用户其实想贴文字）时不介入，交给浏览器默认行为。 */
+async function clipboardImageFallbacks(cd) {
+  const out = [];
+  if (cd && cd.getData) {
+    const html = cd.getData("text/html");
+    if (html) {
+      const { srcs, text } = parseClipboardHtml(html);
+      if (!text.trim()) for (const src of srcs) { const f = await urlToImageFile(src); if (f) out.push(f); }
+    }
+    if (!out.length) {
+      const txt = (cd.getData("text/uri-list") || cd.getData("text/plain") || "").trim();
+      if (isImageUrl(txt)) { const f = await urlToImageFile(txt); if (f) out.push(f); }
+    }
+    // 有可见文字 → 用户多半想贴文字，别再动系统剪贴板免得抢了默认粘贴
+    if (out.length || (cd.getData("text/plain") || "").trim()) return out;
+  }
+  // 兜底一：直接向后端要系统剪贴板图片（部分 WebView，尤其 macOS WKWebView，不会把截图塞进 paste 事件）
+  if (!out.length) {
+    const f = await apiReadClipboardImage();
+    if (f) out.push(f);
+  }
+  // 兜底二：浏览器 clipboard API（Chromium 等内核截图会走这里）
+  if (!out.length && typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.read) {
+    try {
+      for (const ci of await navigator.clipboard.read()) {
+        const type = (ci.types || []).find(t => /^image\//i.test(t));
+        if (!type) continue;
+        const blob = await ci.getType(type);
+        const ext = (type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
+        out.push(new File([blob], `clipboard.${ext}`, { type }));
+      }
+    } catch { /* 无权限或内核不支持：忽略 */ }
+  }
+  return out;
+}
 function bindKeyboard() {
   document.addEventListener("keydown", e => {
     if (mindPane.hidden || !activeMap) return;
+    if (mindLightbox && !mindLightbox.hidden) return;   // 灯箱打开时不吃删除键
     if (e.key !== "Delete" && e.key !== "Backspace") return;
     const ae = document.activeElement;
     if (ae && (ae.isContentEditable || ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
@@ -1004,5 +1706,18 @@ async function init() {
   bindToolbar();
   bindConfirm();
   bindKeyboard();
+  bindImagePaste();
+  bindLightbox();
+  // 文件选择框：把选中的图片写入 _pendingImgNodeId 指向的节点
+  if (mindImageInput) {
+    mindImageInput.addEventListener("change", async () => {
+      const nodeId = _pendingImgNodeId;
+      _pendingImgNodeId = null;
+      const files = Array.from(mindImageInput.files || []);
+      mindImageInput.value = "";
+      if (nodeId == null) return;
+      await addImagesToNode(nodeId, files);
+    });
+  }
 }
 init();

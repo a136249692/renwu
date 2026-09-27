@@ -172,6 +172,9 @@ const imageZoomInBtn  = $("image-zoom-in");
 const imageZoomLabel  = $("image-zoom-label");
 const imageFitBtn     = $("image-fit");
 const imageFileInput  = $("image-file-input");
+const imageCopyBtn    = $("image-copy");
+const imageCutBtn     = $("image-cut");
+const imagePasteBtn   = $("image-paste");
 
 /* ---------- 状态 ---------- */
 let folders = [];
@@ -504,6 +507,7 @@ function syncImageToolbarBtns() {
   syncUncombineBtn();
   syncGroupBtns();
   syncAlignBtns();
+  syncClipboardBtns();
 }
 /* ---------- 分组 / 解散按钮显隐 ---------- */
 function syncGroupBtns() {
@@ -749,6 +753,169 @@ function startRenameCaption(e, it, el) {
   input.addEventListener("mousedown", ev => ev.stopPropagation());
 }
 
+/* ---------- 剪贴板：复制 / 剪切 / 粘贴 ----------
+ * 语义：
+ *   - 复制/剪切 → 把当前选中的图片连同「描述文字(title)」整体缓存到内存剪贴板
+ *   - 粘贴 → 在 activeFolder 里为每张图复制一份新 item（title/宽高/x/y 全同步），
+ *     原夹不动（复制）或删除（剪切）
+ * 剪贴板存的是"快照"而不是"引用"：粘贴后原图后续改名/移动/删除都不影响已粘贴的副本。
+ *
+ * snapshot: {
+ *   mode: "copy" | "cut",
+ *   takenFrom: number,          // 原夹 id，仅供调试/日志
+ *   takenAt: number,            // 时间戳，避免误判
+ *   items: [ { srcFolderId, srcItemId, file_name, title, x, y, width, height, bytes } ]
+ * }
+ *
+ * 关键：bytes 必须提前读出——切换夹后 apiReadImageBytes 需要 folderId，
+ * 快照里直接带上 Uint8Array 就一劳永逸。 */
+let _clipboard = null;
+/* 应用内跨模块图片剪贴板桥：把当前剪贴板快照挂到 window.__glassImgClip，
+   让「思维块粘贴」等其它模块也能取用（在图片夹复制的图可以直接贴进思维块）。
+   只携带字节+文件名，不暴露内部 item id；剪切时通过 onConsume 回调删源图。 */
+const SHARED_CLIP_KEY = "__glassImgClip";
+function publishSharedClip(snap) {
+  try {
+    window[SHARED_CLIP_KEY] = {
+      owner: "images",
+      mode: snap.mode,
+      items: snap.items.map(s => ({ name: s.file_name, bytes: s.bytes, title: s.title || "" })),
+      onConsume: snap.mode === "cut" ? () => consumeCutSources(snap.items) : null,
+    };
+  } catch (e) { console.warn("[图片墙] 发布剪贴板到应用内桥失败:", e); }
+}
+async function snapshotSelection(mode) {
+  if (!activeFolder || selection.size === 0) return null;
+  const snaps = [];
+  for (const id of selection) {
+    const it = items.find(x => x.id === id);
+    if (!it) continue;
+    const bytes = await apiReadImageBytes(it);
+    if (!bytes) continue;
+    snaps.push({
+      srcFolderId: it.folder_id ?? activeFolder.id,
+      srcItemId: it.id,
+      file_name: it.file_name,
+      title: it.title || "",
+      x: it.x || 0, y: it.y || 0,
+      width: it.width || CARD_DEFAULT_W,
+      height: it.height || CARD_DEFAULT_W,
+      bytes,
+    });
+  }
+  if (!snaps.length) return null;
+  return { mode, takenFrom: activeFolder.id, takenAt: Date.now(), items: snaps };
+}
+async function copySelection() {
+  if (!activeFolder || selection.size === 0) { toast("请先选中至少 1 张图片"); return; }
+  const snap = await snapshotSelection("copy");
+  if (!snap) { toast("复制失败：无法读取图片数据"); return; }
+  _clipboard = snap;
+  publishSharedClip(snap);
+  syncImageToolbarBtns();
+  toast(`已复制 ${snap.items.length} 张（含描述文字）`);
+}
+async function cutSelection() {
+  if (!activeFolder || selection.size === 0) { toast("请先选中至少 1 张图片"); return; }
+  const snap = await snapshotSelection("cut");
+  if (!snap) { toast("剪切失败：无法读取图片数据"); return; }
+  // 剪切 = 「标记为剪切模式的复制」：此刻不动源图，只在剪贴板上打上 mode=cut 标记。
+  // 真正的删除发生在粘贴成功之后（pasteClipboard 末尾）——和 OS 剪贴板语义一致，
+  // 这样用户「Ctrl+X 后按 Esc 取消」或「贴到错的夹后想撤回」都不会丢数据。
+  _clipboard = snap;
+  publishSharedClip(snap);
+  syncImageToolbarBtns();
+  toast(`已剪切 ${snap.items.length} 张（含描述文字）——去目标夹按 Ctrl+V`);
+}
+async function pasteClipboard() {
+  if (!_clipboard || !_clipboard.items.length) {
+    toast("剪贴板为空：请先在任意图片夹里 Ctrl+C 复制或 Ctrl+X 剪切");
+    return;
+  }
+  if (!activeFolder) { toast("请先打开一个图片夹再粘贴"); return; }
+  // 若剪贴板是「剪切」模式，粘贴完成后清空剪贴板（标准 OS 语义）。
+  const isCut = _clipboard.mode === "cut";
+  const snaps = _clipboard.items;
+  // 目标位置：以「当前视图可视区中心」为基准，多张时轻微错位避免完全重叠
+  const r = imageCanvas.getBoundingClientRect();
+  const origin = {
+    x: (r.width / 2 - view.x) / view.zoom - 110,   // 卡片宽约 220，居中偏左
+    y: (r.height / 2 - view.y) / view.zoom - 110,
+  };
+  let okCount = 0;
+  for (let i = 0; i < snaps.length; i++) {
+    const s = snaps[i];
+    const ext = (s.file_name.split(".").pop() || "png").toLowerCase();
+    const newFileName = `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}.${ext}`;
+    try {
+      const newItem = await apiSaveImage(activeFolder.id, newFileName, s.title || "", s.bytes);
+      if (!newItem) continue;
+      newItem.x = origin.x + i * 24;
+      newItem.y = origin.y + i * 24;
+      newItem.width = s.width;
+      newItem.height = s.height;
+      newItem.z = ++zTop;
+      items.push(newItem);
+      debouncedSaveItem(newItem.id);
+      okCount++;
+    } catch (err) {
+      console.warn("[图片墙] 粘贴单张失败:", err);
+    }
+  }
+  syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
+  renderFolderList();
+  renderItems();
+  if (okCount === 0) {
+    toast("粘贴失败：没有图片写入成功");
+    return;
+  }
+  // 剪切语义：粘贴成功后才删除源夹里的原图。
+  // 「剪切到自身夹」在语义上等价于「剪切后原地复制再删源」，因此同样执行删除——
+  // 用户在同一夹 Ctrl+X 选中 → Ctrl+V 后，选中的原图被换成一份新副本（位置居中）。
+  if (isCut) {
+    await consumeCutSources(snaps);
+    _clipboard = null;
+    try { window[SHARED_CLIP_KEY] = null; } catch { /* 桥不存在也无所谓 */ }
+  }
+  syncImageToolbarBtns();
+  toast(`已从剪贴板粘贴 ${okCount} 张（含描述文字）`);
+}
+/* 删除剪切源图并同步内存中的夹计数。
+   同一份逻辑既服务于「图片夹内粘贴」，也服务于「跨模块粘贴到思维块」时的 onConsume。
+   源夹可能是当前夹，也可能是别的夹：当前夹命中就重拉列表，否则只调整 total，
+   等切回该夹时 setActiveFolder 会重新从后端加载，状态自然一致。 */
+async function consumeCutSources(snaps) {
+  for (const s of snaps) {
+    try { await apiDeleteItem(s.srcItemId); }
+    catch (err) { console.warn("[图片墙] 粘贴后删除源图失败:", err); }
+  }
+  if (activeFolder && snaps.some(s => s.srcFolderId === activeFolder.id)) {
+    items = await apiListItems(activeFolder.id);
+    renderItems();
+    syncFolderTotal(folders.find(x => x.id === activeFolderId), items.length);
+    renderFolderList();
+  } else {
+    const affectedFolders = new Set(snaps.map(s => s.srcFolderId));
+    for (const fid of affectedFolders) {
+      const srcFolder = folders.find(x => x.id === fid);
+      if (srcFolder && typeof srcFolder.total === "number") {
+        const deleted = snaps.filter(s => s.srcFolderId === fid).length;
+        srcFolder.total = Math.max(0, srcFolder.total - deleted);
+      }
+    }
+    renderFolderList();
+  }
+}
+/* 按钮显隐：copy/cut 需 selection≥1；paste 需剪贴板非空且当前夹存在 */
+function syncClipboardBtns() {
+  if (imageCopyBtn) imageCopyBtn.hidden = !activeFolder || selection.size === 0;
+  if (imageCutBtn)  imageCutBtn.hidden  = !activeFolder || selection.size === 0;
+  if (imagePasteBtn) {
+    imagePasteBtn.hidden = !_clipboard || !_clipboard.items.length || !activeFolder;
+    if (!_clipboard || !_clipboard.items.length) imagePasteBtn.title = "粘贴到当前图片夹（Ctrl+V）";
+    else imagePasteBtn.title = `粘贴 ${_clipboard.items.length} 张到当前夹（Ctrl+V）`;
+  }
+}
 /* ---------- 卡片复制/删除 ---------- */
 async function cloneItem(it) {
   if (!activeFolder) return;
@@ -1092,9 +1259,13 @@ async function uploadFile(file) {
     const r = imageCanvas.getBoundingClientRect();
     const cx = (r.width / 2 - view.x) / view.zoom;
     const cy = (r.height / 2 - view.y) / view.zoom;
-    const w = dim.w && dim.w > 0 ? Math.min(dim.w, 480) : CARD_DEFAULT_W;
-    const scale = dim.h && dim.w ? Math.min(1, 480 / dim.w) : 1;
-    const h = dim.h ? dim.h * scale : w;
+    // 粘贴/上传的图片默认按「原图完整长宽」展示，不再限制到 480px：
+    //   · 旧逻辑 Math.min(dim.w, 480) 会把大尺寸图缩到 480，用户看不到完整宽高。
+    //   · 现在直接采用原图宽高，card 的 aspect-ratio 与图片一致，
+    //     .card-img 的 object-fit:cover 就不会裁切，用户第一眼就能看到全图。
+    //   · 尺寸上限仍由 30MB 体积校验保证不至于过大。
+    const w = dim.w && dim.w > 0 ? dim.w : CARD_DEFAULT_W;
+    const h = dim.h && dim.h > 0 ? dim.h : w;
     it.x = cx - w / 2;
     it.y = cy - h / 2;
     it.width = w;
@@ -1485,9 +1656,17 @@ function bindCanvasEvents() {
         if (f) imgs.push(f);
       }
     }
-    if (!imgs.length) return;
-    e.preventDefault();
-    for (const f of imgs) await uploadFile(f);
+    if (imgs.length) {
+      e.preventDefault();
+      for (const f of imgs) await uploadFile(f);
+      return;
+    }
+    // 没有外部图片时：如果内部剪贴板非空，就把内部剪贴板贴到当前夹。
+    // 否则用户从 A 夹复制后再按 Ctrl+V 就只会看到"啥也没发生"，很反直觉。
+    if (_clipboard && _clipboard.items.length) {
+      e.preventDefault();
+      pasteClipboard();
+    }
   });
 }
 
@@ -1512,6 +1691,9 @@ function bindToolbar() {
     // uploadFile 内部会在没有夹时自动创建夹。
     imageFileInput.click();
   });
+  if (imageCopyBtn)  imageCopyBtn.addEventListener("click", () => copySelection());
+  if (imageCutBtn)   imageCutBtn.addEventListener("click",  () => cutSelection());
+  if (imagePasteBtn) imagePasteBtn.addEventListener("click", () => pasteClipboard());
   if (imageZoomInBtn) imageZoomInBtn.addEventListener("click", () => {
     if (!imageCanvas) return;
     const r = imageCanvas.getBoundingClientRect();
@@ -1541,6 +1723,24 @@ function bindKeyboard() {
     if (!imagePane || imagePane.hidden) return;
     if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
     if (_renaming) return;
+    // Ctrl+C / Ctrl+X：图片复制 / 剪切到内部剪贴板。
+    // 这里必须放在最前面——浏览器原生 Ctrl+C 在 selection 非空时会把页面上
+    // 选中的可见文本复制到系统剪贴板（可能包含任务标题等），我们要把它
+    // 重定向为「复制到图片剪贴板」。有 selection 时才吞掉默认行为。
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "c") {
+      if (selection.size > 0) {
+        e.preventDefault();
+        copySelection();
+        return;
+      }
+    }
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "x") {
+      if (selection.size > 0) {
+        e.preventDefault();
+        cutSelection();
+        return;
+      }
+    }
     // Ctrl+M / Cmd+M：组合功能已下线（UI 隐藏），快捷键也不再触发
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey &&
         (e.key === "m" || e.key === "M")) {
