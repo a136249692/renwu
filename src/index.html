@@ -310,6 +310,22 @@
       </div>
     </div>
 
+    <!-- 图片夹卡片灯箱：点击卡片右上角「放大」按钮后全屏查看 -->
+    <div class="img-lightbox" id="img-lightbox" hidden>
+      <div class="lb-backdrop" id="img-lightbox-backdrop"></div>
+      <div class="lb-stage" id="img-lightbox-stage">
+        <img id="img-lightbox-img" alt="" draggable="false" />
+      </div>
+      <button class="lb-close" id="img-lightbox-close" title="关闭（Esc）">×</button>
+      <div class="lb-count" id="img-lightbox-title" hidden></div>
+      <div class="lb-tools">
+        <button id="img-lightbox-zoom-out" title="缩小">−</button>
+        <span id="img-lightbox-zoom-label">100%</span>
+        <button id="img-lightbox-zoom-in" title="放大">＋</button>
+        <button id="img-lightbox-reset" title="重置缩放">⟲ 重置</button>
+      </div>
+    </div>
+
     <input type="file" id="image-file-input" accept="image/*" multiple hidden />
     <input type="file" id="mind-image-input" accept="image/*" multiple hidden />
     <script type="module" src="./main.js"></script>

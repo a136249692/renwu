@@ -139,7 +139,8 @@ let edges = [];              // MindmapEdge[] (当前导图)
 let pendingEdges = [];       // 编辑中新增的边（连线是否会合并）
 const nodeEls = new Map();   // nodeId -> DOM el
 
-let selectedNodeId = null;
+let selectedNodeId = null;       // 最近一次选中/激活的节点（作为锚点，供工具栏、复制、删除单点）
+let selectedNodeIds = new Set(); // 多选集合：Ctrl/⌘+click 累积，普通 click 重置为单点
 let selectedEdgeId = null;
 let editingNode = null;      // 正在编辑内容的节点对象
 let connectingPort = null;   // { node, x, y } 连线起点
@@ -168,6 +169,12 @@ function readSharedClip() {
     const c = window[SHARED_CLIP_KEY];
     return (c && Array.isArray(c.items) && c.items.length) ? c : null;
   } catch { return null; }
+}
+/* 显式复制标记窗口（本模块写入方也使用）：写入 _mindClip 或调用 publishSharedClip 时
+   在此时间窗内跳过 document.copy 监听器的清理逻辑——这样显式复制触发的隐式 copy 事件
+   不会被误当成外部复制而清空刚写入的剪贴板。 */
+function markExplicitCopy() {
+  try { window.__glassExplicitCopyUntil = Date.now() + 500; } catch {}
 }
 /* list / index：灯箱当前围绕的图片集合与下标，用于多图左右切换 */
 let lb = { scale: 1, tx: 0, ty: 0, dragging: false, moved: false, list: [], index: 0 };
@@ -578,14 +585,24 @@ function startRenameMap(li, m, e) {
     _renaming = false;   // 先复位标志，renderMapList 才会真正重建（否则输入框永远清不掉）
     const val = (input.value || "").trim() || old;
     if (save && val !== old) {
+      // 与任务夹一致：先局部更新 DOM 文字（用一个新 <span class="name"> 替换 input），
+      // 后端成功后再同步数据模型与顶部标题——renderMapList 不再被调用，避免全量重绘
+      // 打断拖动/焦点，也让「提交→列表刷新」在视觉上是一次性完成而不是「闪一下」。
+      const n = document.createElement("span");
+      n.className = "name";
+      n.textContent = val;
+      input.replaceWith(n);
       // apiRenameMap 是异步的：m.name 要在其内部 await 完成后才更新。
-      // 必须把列表刷新放进 .then() 里，否则渲染发生在名字落库之前，界面仍是旧名。
+      // 顶部标题同步放进 .then() 里，确保渲染时拿到的就是最终名字。
       apiRenameMap(m.id, val).then(() => {
         if (m.id === activeMapId) renderMindHeader();
-        renderMapList();
       });
     } else {
-      renderMapList();
+      // 取消或空输入：就地还原成 .name，不重建列表
+      const n = document.createElement("span");
+      n.className = "name";
+      n.textContent = old;
+      input.replaceWith(n);
     }
   };
   input.addEventListener("blur", () => commit(true));
@@ -750,7 +767,7 @@ async function setActiveMap(id) {
   }
   activeMapId = id;
   activeMap = id != null ? (maps.find(m => m.id === id) || null) : null;
-  selectedNodeId = null; selectedEdgeId = null; editingNode = null;
+  selectedNodeId = null; selectedNodeIds = new Set(); selectedEdgeId = null; editingNode = null;
   clearMindImages();
   renderMapList();
   if (!activeMap) {
@@ -819,7 +836,7 @@ function renderMindCanvas() {
 }
 function makeNodeEl(n) {
   const el = document.createElement("div");
-  el.className = "mind-node" + (n.id === selectedNodeId ? " selected" : "");
+  el.className = "mind-node" + (selectedNodeIds.has(n.id) ? " selected" : "");
   el.dataset.nodeId = n.id;
   el.style.left = n.x + "px";
   el.style.top = n.y + "px";
@@ -1006,6 +1023,7 @@ async function removeNode(id) {
   );
   if (!ok) return;
   if (selectedNodeId === id) selectedNodeId = null;
+  selectedNodeIds.delete(id);
   if (editingNode && editingNode.id === id) editingNode = null;
   if (nodeImages.has(id)) { for (const im of nodeImages.get(id)) releaseImgUrl(im.file_path); nodeImages.delete(id); }
   expandedImgs.delete(id);
@@ -1073,6 +1091,7 @@ async function removeNodeImage(n, im) {
 async function copyNodeImage(n, im, mode) {
   const bytes = await apiReadNodeImageBytes(im.file_path);
   if (!bytes || !bytes.length) { toast("操作失败：无法读取图片数据", 3200); return; }
+  markExplicitCopy();
   _mindClip = {
     mode,
     type: "image",
@@ -1372,11 +1391,16 @@ function bindLightbox() {
 /* ---------- 选择 / 编辑 ---------- */
 function selectNode(id) {
   selectedNodeId = id;
+  selectedNodeIds = new Set(id != null ? [id] : []);
   selectedEdgeId = null;
-  for (const [nid, el] of nodeEls) {
-    el.classList.toggle("selected", nid === id);
-  }
+  applyNodeSelectionClasses();
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
+}
+/* 把「.selected」class 刷到所有节点上，与 selectedNodeIds 集合保持同步。 */
+function applyNodeSelectionClasses() {
+  for (const [nid, el] of nodeEls) {
+    el.classList.toggle("selected", selectedNodeIds.has(nid));
+  }
 }
 /* 在纯文本的可编辑区里，按 (x,y) 坐标算出应该放光标的位置，返回一个 collapsed Range。
    优先级：
@@ -1435,6 +1459,7 @@ function enterEdit(n, body, anchor) {
   body.focus();
   editingNode = n;
   selectedNodeId = n.id;
+  if (!selectedNodeIds.has(n.id)) selectedNodeIds.add(n.id);
   const sel = window.getSelection();
   if (targetRange) {
     sel.removeAllRanges();
@@ -1525,20 +1550,53 @@ function downOnNode(e, el, n) {
   // 否则拖拽开始那 4px 阈值内用户会先看到「文本被选中」再进入拖动，
   // 视觉上像「先选字再拖」，是「很难选择并拖动」的直接原因之一。
   if (e.target.closest(".mind-node-body")) e.preventDefault();
-  selectNode(n.id, el);
+
+  // 多选策略（与文件选择器心智模型一致）：
+  //   · Ctrl/⌘+点（无拖动）：切换当前节点的选中态；若原来已选则移除，未选则加入
+  //   · Ctrl/⌘+按下并拖动：整组一起动；松手时才应用切换（避免拖动期间视觉闪）
+  //   · 普通按下：
+  //       · 按住的是已选节点之一 → 保留整组一起拖
+  //       · 按住的是未选节点 → 重置集合为只含该节点，只拖这一个
+  const isCtrl = e.ctrlKey || e.metaKey;
+  const wasSelectedBefore = selectedNodeIds.has(n.id);
+  selectedNodeId = n.id;
+  selectedEdgeId = null;
+  // 无 Ctrl 且按下的节点不在当前选中集合里 → 重置为单点
+  if (!isCtrl && !wasSelectedBefore) {
+    selectedNodeIds = new Set([n.id]);
+  } else if (!selectedNodeIds.has(n.id)) {
+    selectedNodeIds.add(n.id);
+  }
+  applyNodeSelectionClasses();
+
+  // 记录参与本次拖动的节点集合（原位置快照，避免边拖动边读导致累积误差）
+  const dragIds = new Set(selectedNodeIds);
+  const origins = new Map();
+  for (const id of dragIds) {
+    const nn = nodes.find(x => x.id === id);
+    if (nn) origins.set(id, { x: nn.x, y: nn.y });
+  }
+
   const startX = e.clientX, startY = e.clientY;
-  const oX = n.x, oY = n.y;
-  drag = { kind: "node", moved: false, id: null };
+  drag = { kind: "node", moved: false, ids: dragIds, origins };
   const onMove = ev => {
     if (!drag || drag.kind !== "node") return;
     const dx = ev.clientX - startX, dy = ev.clientY - startY;
     if (!drag.moved && Math.hypot(dx, dy) < 4) return;
     drag.moved = true;
     const nz = view.zoom;
-    n.x = oX + dx / nz;
-    n.y = oY + dy / nz;
-    el.style.left = n.x + "px";
-    el.style.top = n.y + "px";
+    // 组内所有节点都跟随位移，位置变化以「锚点」的相对位移为准
+    const ddx = dx / nz, ddy = dy / nz;
+    for (const id of drag.ids) {
+      const nn = nodes.find(x => x.id === id);
+      const el2 = nodeEls.get(id);
+      if (!nn || !el2) continue;
+      const o = origins.get(id);
+      nn.x = o.x + ddx;
+      nn.y = o.y + ddy;
+      el2.style.left = nn.x + "px";
+      el2.style.top = nn.y + "px";
+    }
     placeNodeOnTop(el, n);
     renderEdges();
   };
@@ -1547,11 +1605,28 @@ function downOnNode(e, el, n) {
     window.removeEventListener("pointerup", onUp);
     window.removeEventListener("pointercancel", onUp);
     const moved = drag && drag.moved;
+    const movedIds = drag ? drag.ids : null;
     drag = null;
-    if (moved) {
+    if (moved && movedIds) {
       _suppressClickUntil = Date.now() + 300;   // 拖过才屏蔽后续 click
-      await apiUpdateNodePos(n.id, n.x, n.y);
+      // 逐个节点落库（后端无批量接口，N 次调用即可，节点数量通常不多）
+      const tasks = [];
+      for (const id of movedIds) {
+        const nn = nodes.find(x => x.id === id);
+        if (nn) tasks.push(apiUpdateNodePos(id, nn.x, nn.y));
+      }
+      await Promise.all(tasks);
       renderEdges();
+    } else if (isCtrl) {
+      // Ctrl/⌘+点（无拖动）：切换当前节点的选中态——按下时先「加入」，此处再根据按下前状态还原
+      if (wasSelectedBefore) {
+        selectedNodeIds.delete(n.id);
+        if (selectedNodeId === n.id && !selectedNodeIds.size) selectedNodeId = null;
+      } else {
+        // 未拖动且按下前未选中 → 保持加入状态（已在 down 里 add 过）
+      }
+      applyNodeSelectionClasses();
+      if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
     }
   };
   placeNodeOnTop(el, n);
@@ -1676,6 +1751,7 @@ function renderEdges() {
 function selectEdge(id) {
   selectedEdgeId = id;
   selectedNodeId = null;
+  selectedNodeIds = new Set();
   for (const [ , el] of nodeEls) el.classList.remove("selected");
   const ge = mindEdgesSvg.querySelector(`.mind-edge[data-edge-id="${id}"]`);
   mindEdgesSvg.querySelectorAll(".mind-edge").forEach(g => g.classList.toggle("selected", g === ge));
@@ -1808,7 +1884,7 @@ function bindCanvasEvents() {
   });
 }
 function deselectAll() {
-  selectedNodeId = null; selectedEdgeId = null;
+  selectedNodeId = null; selectedEdgeId = null; selectedNodeIds = new Set();
   for (const [ , el] of nodeEls) el.classList.remove("selected");
   mindEdgesSvg.querySelectorAll(".mind-edge").forEach(g => g.classList.remove("selected"));
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
@@ -1862,11 +1938,13 @@ function bindImagePaste() {
     if (mindLightbox && !mindLightbox.hidden) return;
     const ae = document.activeElement;
     if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA")) return;
-    // 优先使用应用内剪贴板（_mindClip / __glassImgClip）——它们代表用户最近的显式
-    // 复制/剪切意图；系统剪贴板（cd 里的 files 或 fallback 兜底读出的图）可能是
-    // 上次截图/其他应用的旧残留，若优先走它，剪切就退化成复制（源图不会被清理）。
-    // 因此只有当内部剪贴板为空时才读取系统剪贴板图片。
     const cd = e.clipboardData;
+    // ★ 关键优先级：正在编辑文本、且这次粘贴带了可见纯文本 → 让浏览器默认粘贴生效。
+    // 之前这里在检查图片剪贴板后才判断文本，导致用户「Ctrl+C 复制了文本、但 __glassImgClip
+    // 里还有上次的图片」时，Ctrl+V 依然粘的是图片，而不是刚复制的文字。
+    const editingText = !!editingNode || !!(ae && ae.isContentEditable);
+    const plainText = (cd && cd.getData ? cd.getData("text/plain") : "") || "";
+    if (plainText.trim() && editingText) return;
     // 「仅图片」剪贴板：mindBlock 类型的剪贴板走 Ctrl+Shift+V，Ctrl+V 不处理
     const hasInternal = !!(_mindClip && _mindClip.items.length && (_mindClip.type || "image") === "image");
     const hasShared = !!readSharedClip();
@@ -1882,11 +1960,6 @@ function bindImagePaste() {
       // 复制自网页/其它应用的图片常常只出现在 HTML/URL 里，或干脆没进 paste 事件，逐个兜底。
       if (!extFiles.length) extFiles.push(...await clipboardImageFallbacks(cd));
     }
-    // 正在编辑文字、且剪贴板里是纯文本时，让浏览器默认粘贴生效——
-    // 否则应用内图片剪贴板会「抢走」本该粘贴进去的文字。
-    const plainText = (cd && cd.getData ? cd.getData("text/plain") : "") || "";
-    const editingText = !!editingNode || !!(ae && ae.isContentEditable);
-    if (!extFiles.length && !hasInternal && !hasShared && plainText.trim() && editingText) return;
     if (!extFiles.length && !hasInternal && !hasShared) return;   // 非图片粘贴：不打扰默认行为
     e.preventDefault();
     // 正在编辑文字时优先写入被编辑的节点，否则写入当前选中节点
@@ -1905,6 +1978,42 @@ function bindImagePaste() {
     _sawPasteEvent = false;
     if (_vFallbackTimer) clearTimeout(_vFallbackTimer);
     _vFallbackTimer = setTimeout(() => { if (!_sawPasteEvent) fallbackPasteClipboardImage(); }, 180);
+  });
+}
+/* document 级 copy 监听：外部/系统剪贴板覆盖本应用「图片剪贴板」。
+   场景：用户在图片夹按 Ctrl+Shift+C「仅复制图片」后，又框选页面上的文字按 Ctrl+C 复制——
+   这时 __glassImgClip / _mindClip 都是上一次遗留的图片剪贴板，若不主动清理，
+   后面在思维块按 Ctrl+V 会粘到旧图片而不是刚复制的文字。
+   本应用内主动触发的复制（Ctrl+C/Ctrl+X/Ctrl+Shift+C 键盘、图片按钮、思维块复制）
+   会通过 markExplicitCopy() 把 __glassExplicitCopyUntil 打到未来 500ms，
+   在此时间窗内不执行清理，避免把刚写入的剪贴板清掉。 */
+function bindExternalCopyInvalidatesImageClip() {
+  document.addEventListener("copy", e => {
+    try {
+      if (Date.now() < (window.__glassExplicitCopyUntil || 0)) return;
+    } catch {}
+    // 若本次 copy 事件里已经有纯文本/HTML，说明用户是复制文字（而不是本应用的图片复制）——
+    // 无论 __glassImgClip 和 _mindClip 是谁写的，都被覆盖。
+    const cd = e.clipboardData;
+    let hasText = false;
+    if (cd && cd.getData) {
+      try { if ((cd.getData("text/plain") || "").trim()) hasText = true; } catch {}
+      if (!hasText) { try { if ((cd.getData("text/html") || "").trim()) hasText = true; } catch {} }
+    }
+    const ae = document.activeElement;
+    const editingText = !!editingNode || !!(ae && ae.isContentEditable);
+    // 触发条件：
+    //   1) copy 事件里带了可见文本（用户显然在复制文字，图片剪贴板已过期）
+    //   2) 或者正在编辑思维块文本、但没有拿到 copy 事件里的文本（部分内核不填充 clipboardData）
+    const shouldInvalidate = hasText || (editingText && !hasText);
+    if (!shouldInvalidate) return;
+    // 清理跨模块图片剪贴板
+    try { window[SHARED_CLIP_KEY] = null; } catch {}
+    // 清理思维块内部「仅图片」剪贴板（mindBlock 类型走 Ctrl+Shift+V，与文字复制不冲突，保留）
+    if (_mindClip && (_mindClip.type || "image") === "image") {
+      _mindClip = null;
+      try { refreshAllNodeImages(); syncMindToolbarBtns(); } catch {}
+    }
   });
 }
 /* 键盘兜底的实际动作：把系统剪贴板图片贴进当前编辑/选中的节点（仅桌面端）。
@@ -2036,6 +2145,7 @@ async function init() {
   bindConfirm();
   bindKeyboard();
   bindImagePaste();
+  bindExternalCopyInvalidatesImageClip();
   bindLightbox();
   // 文件选择框：把选中的图片写入 _pendingImgNodeId 指向的节点
   if (mindImageInput) {

@@ -411,6 +411,9 @@ function createCardEl(it) {
     </div>
     <div class="card-caption" title="双击编辑标题">${esc(it.title) || "（无标题）"}</div>
     <div class="card-tools">
+      <button class="tool-btn" data-act="preview" title="放大查看" aria-label="放大查看">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="20" y1="20" x2="16" y2="16"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+      </button>
       <button class="tool-btn" data-act="copy" title="复制">⧉</button>
       <button class="tool-btn" data-act="top" title="置顶">⤒</button>
       <button class="tool-btn" data-act="rm" title="删除">×</button>
@@ -472,7 +475,8 @@ function bindCardEvents(el, it) {
     if (!btn) return;
     e.stopPropagation();
     const act = btn.dataset.act;
-    if (act === "copy") cloneItem(it);
+    if (act === "preview") openCardLightbox(it, el.querySelector(".card-img"));
+    else if (act === "copy") cloneItem(it);
     else if (act === "top") bringToFront(it);
     else if (act === "rm") removeItem(it.id);
   });
@@ -779,7 +783,15 @@ let _clipboard = null;
    让「思维块粘贴」等其它模块也能取用（在图片夹复制的图可以直接贴进思维块）。
    只携带字节+文件名，不暴露内部 item id；剪切时通过 onConsume 回调删源图。 */
 const SHARED_CLIP_KEY = "__glassImgClip";
+/* 显式复制标记窗口：本应用内主动触发的复制/剪切操作（Ctrl+C/Ctrl+X/Ctrl+Shift+C
+   键盘快捷键、图片按钮点击）会在此时间窗内跳过 document.copy 监听器的清理逻辑——
+   这样用户「Ctrl+Shift+C 复制图片」触发的隐式 copy 事件不会被误当成外部复制而清空
+   刚写入的共享剪贴板。外部复制（用户框选页面文本后 Ctrl+C）会走完整清理路径。 */
+function markExplicitCopy() {
+  try { window.__glassExplicitCopyUntil = Date.now() + 500; } catch {}
+}
 function publishSharedClip(snap) {
+  markExplicitCopy();
   try {
     window[SHARED_CLIP_KEY] = {
       owner: "images",
@@ -1888,11 +1900,152 @@ function askInput(title, placeholder) {
   });
 }
 
+/* ---------- 卡片灯箱：点右上角「🔍」按钮放大查看单张图片 ---------- */
+const imgLightbox       = typeof document !== "undefined" ? $("img-lightbox") : null;
+const imgLightboxImg    = typeof document !== "undefined" ? $("img-lightbox-img") : null;
+const imgLightboxStage  = typeof document !== "undefined" ? $("img-lightbox-stage") : null;
+const imgLightboxBackdrop = typeof document !== "undefined" ? $("img-lightbox-backdrop") : null;
+const imgLightboxClose  = typeof document !== "undefined" ? $("img-lightbox-close") : null;
+const imgLightboxTitle  = typeof document !== "undefined" ? $("img-lightbox-title") : null;
+const imgLightboxZoomLabel = typeof document !== "undefined" ? $("img-lightbox-zoom-label") : null;
+const imgLightboxZoomIn = typeof document !== "undefined" ? $("img-lightbox-zoom-in") : null;
+const imgLightboxZoomOut = typeof document !== "undefined" ? $("img-lightbox-zoom-out") : null;
+const imgLightboxReset  = typeof document !== "undefined" ? $("img-lightbox-reset") : null;
+let lbItem = null;   // 当前展示的 item（it）
+let lbScale = 1, lbTx = 0, lbTy = 0;
+let lbDragging = false, lbMoved = false;
+
+function forbidImageDownloadLocal(imgEl) {
+  if (!imgEl) return;
+  imgEl.draggable = false;
+  imgEl.addEventListener("contextmenu", e => e.preventDefault());
+  imgEl.addEventListener("dragstart", e => e.preventDefault());
+}
+
+async function openCardLightbox(it, srcImgEl) {
+  if (!imgLightbox) return;
+  lbItem = it;
+  lbScale = 1; lbTx = 0; lbTy = 0; lbDragging = false; lbMoved = false;
+  // 标题栏（无图标题则显示文件主名，再退化为「图片」）
+  const label = (it.title || "").trim() || (it.file_name ? it.file_name.split("/").pop() : "") || "图片";
+  if (imgLightboxTitle) {
+    imgLightboxTitle.textContent = label;
+    imgLightboxTitle.hidden = false;
+  }
+  imgLightbox.hidden = false;
+  if (imgLightboxImg) {
+    imgLightboxImg.removeAttribute("src");
+    imgLightboxImg.alt = label;
+    imgLightboxImg.style.transform = "translate(0px, 0px) scale(1)";
+    if (imgLightboxZoomLabel) imgLightboxZoomLabel.textContent = "100%";
+  }
+  // 优先复用卡片里已经加载好的 URL，避免二次 IO（Tauri 下 Blob URL 可跨 <img> 复用）
+  let url = (srcImgEl && srcImgEl.src) || null;
+  if (!url) {
+    try {
+      url = await apiReadImageFile(it.folder_id ?? activeFolderId, it.file_path);
+    } catch (e) {
+      console.warn("[图片墙] 灯箱加载图片失败:", e);
+    }
+  }
+  if (imgLightbox.hidden) return;    // 加载期间可能被关闭
+  if (!url) { toast("图片读取失败", 3000); return; }
+  imgLightboxImg.src = url;
+}
+
+function closeCardLightbox() {
+  if (!imgLightbox || imgLightbox.hidden) return;
+  imgLightbox.hidden = true;
+  if (imgLightboxImg) {
+    try { imgLightboxImg.removeAttribute("src"); } catch {}
+  }
+  lbItem = null; lbScale = 1; lbTx = 0; lbTy = 0; lbDragging = false; lbMoved = false;
+}
+
+function applyLightboxTransform() {
+  if (!imgLightboxImg) return;
+  imgLightboxImg.style.transform = `translate(${lbTx}px, ${lbTy}px) scale(${lbScale})`;
+  if (imgLightboxZoomLabel) imgLightboxZoomLabel.textContent = Math.round(lbScale * 100) + "%";
+}
+
+function lightboxZoomAt(factor, clientX, clientY) {
+  const ns = Math.min(8, Math.max(0.2, lbScale * factor));
+  if (ns === lbScale) return;
+  if (clientX != null && imgLightboxStage) {
+    const r = imgLightboxStage.getBoundingClientRect();
+    const px = clientX - (r.left + r.width / 2);
+    const py = clientY - (r.top + r.height / 2);
+    const k = ns / lbScale;
+    lbTx = px - k * (px - lbTx);
+    lbTy = py - k * (py - lbTy);
+  }
+  lbScale = ns;
+  if (lbScale <= 1) { lbTx = 0; lbTy = 0; }
+  applyLightboxTransform();
+}
+
+function lightboxReset() { lbScale = 1; lbTx = 0; lbTy = 0; applyLightboxTransform(); }
+
+function bindCardLightbox() {
+  if (!imgLightbox) return;
+  forbidImageDownloadLocal(imgLightboxImg);
+  if (imgLightboxClose) imgLightboxClose.addEventListener("click", closeCardLightbox);
+  if (imgLightboxBackdrop) imgLightboxBackdrop.addEventListener("click", closeCardLightbox);
+  if (imgLightboxZoomIn)  imgLightboxZoomIn.addEventListener("click", () => lightboxZoomAt(1.2));
+  if (imgLightboxZoomOut) imgLightboxZoomOut.addEventListener("click", () => lightboxZoomAt(0.8333));
+  if (imgLightboxReset)   imgLightboxReset.addEventListener("click", lightboxReset);
+  // 点击舞台空白（非图片）关闭；拖拽平移后不误关
+  if (imgLightboxStage) {
+    imgLightboxStage.addEventListener("click", e => {
+      if (e.target === imgLightboxStage && !lbMoved) closeCardLightbox();
+    });
+    // 滚轮缩放（以光标为锚点）
+    imgLightboxStage.addEventListener("wheel", e => {
+      if (imgLightbox.hidden) return;
+      e.preventDefault();
+      lightboxZoomAt(e.deltaY < 0 ? 1.15 : 0.8696, e.clientX, e.clientY);
+    }, { passive: false });
+    // 拖拽平移
+    imgLightboxStage.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      lbDragging = true; lbMoved = false;
+      const sx = e.clientX, sy = e.clientY, ox = lbTx, oy = lbTy;
+      imgLightboxStage.classList.add("dragging");
+      const onMove = ev => {
+        if (!lbDragging) return;
+        const dx = ev.clientX - sx, dy = ev.clientY - sy;
+        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) lbMoved = true;
+        lbTx = ox + dx; lbTy = oy + dy;
+        applyLightboxTransform();
+      };
+      const onUp = () => {
+        lbDragging = false;
+        imgLightboxStage.classList.remove("dragging");
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    });
+  }
+  // Esc / + / - / 0 键盘快捷键（capture 阶段拦截，避免和 mindmap 的键盘处理冲突）
+  document.addEventListener("keydown", e => {
+    if (imgLightbox.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeCardLightbox(); }
+    else if (e.key === "+" || e.key === "=") { e.preventDefault(); lightboxZoomAt(1.2); }
+    else if (e.key === "-") { e.preventDefault(); lightboxZoomAt(0.8333); }
+    else if (e.key === "0") { e.preventDefault(); lightboxReset(); }
+  }, true);
+}
+
 function init() {
   bindCanvasEvents();
   bindToolbar();
   bindKeyboard();
   bindNewFolderBtn();
+  bindCardLightbox();
   // 暴露给 mindmap.js 的 setMode 钩子
   window.__loadImageWall = () => loadFolders(true);
   // 初始加载一次（如果图片 tab 一开始就是 active 会显示）

@@ -1146,19 +1146,20 @@ function startFolderRename(li, f, e) {
     _folderRenaming = false;
     const val = (input.value || "").trim() || old;
     if (save && val !== old) {
-      api.renameFolder(f.id, val).then(async () => {
-        f.name = val;
-        // 与思维夹一致：局部更新 DOM 文字，不全量重绘（避免拖动/焦点被意外打断）
-        const nEl = input.parentElement.querySelector(".name");
-        if (nEl) {
-          nEl.textContent = val;
-          // 若重命名的就是当前激活的任务夹，同步顶部标题
-          if (f.id === activeFolderId) {
-            folderTitle.textContent = val;
-            if (isStickyFolderActive()) folderTitleSticky.textContent = val;
-          }
-        } else {
-          renderFolders();
+      // 与思维夹一致：先同步把 input 换成 <span class="name">（就地更新文字），
+      // 再调 API 落库。这样即便 API 慢一点或失败，用户看到的是「输入框立刻变
+      // 成新名字」而不是一直停在输入态；renderFolders 也不再被调用，避免拖动/
+      // 焦点被意外打断。
+      const n = document.createElement("span");
+      n.className = "name";
+      n.textContent = val;
+      input.replaceWith(n);
+      f.name = val;
+      api.renameFolder(f.id, val).then(() => {
+        // 若重命名的就是当前激活的任务夹，同步顶部标题
+        if (f.id === activeFolderId) {
+          folderTitle.textContent = val;
+          if (isStickyFolderActive()) folderTitleSticky.textContent = val;
         }
       });
     } else {
@@ -2315,6 +2316,8 @@ function startDrag(e, el, b) {
   /* 跨任务夹移动：记录本轮拖动中最后一次悬停在侧栏任务夹上的 li。
    * 用 elementFromPoint 探测，非 DnD；释放时若不为 null 就迁过去。 */
   let _sidebarDropTarget = null;
+  // 合并预判高亮：本轮拖动中命中的目标块，命中后加 .merge-target 高亮
+  let _mergeTargetEl = null;
   // 拖动落点提示：实时显示块松手后将落入哪个段，解决"拖不进待确认区"的视觉模糊
   const zoneHint = $("drag-zone-hint");
   let lastZoneCls = "";
@@ -2400,10 +2403,29 @@ function startDrag(e, el, b) {
     }
     // 实时显示松手后将落入哪个段，让"拖到待确认区"有明确视觉反馈
     updateZoneHint(curY + elH / 2);
+    // 合并预判：仅当本块仍在 pending 时探测重叠目标，高亮即将合并到的块，
+    // 让用户在松手前就能看到「松手会合并到这」的视觉反馈。跨夹中不做。
+    updateMergeHighlight(nx, ny);
     // 画布边缘自动滚动：当指针接近画布顶/底边时，滚动画布让分界线跟随进入视野，
     // 否则当 done 段被大量历史块撑大后 review 分界线会被推到画布下方几屏之外，
     // 用户视觉上根本看不到 review 区，也就无法把块拖进去。
     edgeAutoScroll(ev);
+  }
+
+  function updateMergeHighlight(nx, ny) {
+    // 只在 pending 阶段判定合并目标：done/review 段里的拖动不做合并，也就不需要高亮
+    if (b.stage !== "todo") {
+      if (_mergeTargetEl) { _mergeTargetEl.classList.remove("merge-target"); _mergeTargetEl = null; }
+      return;
+    }
+    const curRect = { x: nx, y: ny, w: el.offsetWidth, h: el.offsetHeight };
+    const found = findMergeTarget(b, curRect);
+    const hit = found ? found[1] : null;
+    if (hit !== _mergeTargetEl) {
+      if (_mergeTargetEl) _mergeTargetEl.classList.remove("merge-target");
+      if (hit) hit.classList.add("merge-target");
+      _mergeTargetEl = hit;
+    }
   }
 
   function edgeAutoScroll(ev) {
@@ -2443,6 +2465,8 @@ function startDrag(e, el, b) {
     if (!started) return;
     try { el.releasePointerCapture(upEv.pointerId); } catch (_) {}
     el.classList.remove("dragging");
+    // 清掉合并预判高亮：无论后续走哪个分支（合并/迁移/普通移动），都不应残留
+    if (_mergeTargetEl) { _mergeTargetEl.classList.remove("merge-target"); _mergeTargetEl = null; }
     const wrap = canvasWrap || board.closest(".canvas-wrap");
     if (wrap) wrap.classList.remove("is-dragging");
     document.body.classList.remove("is-dragging");
@@ -2544,22 +2568,31 @@ function snapFlat(nx, ny, xLines, yLines) {
 }
 
 /* ---------- 重叠合并 ---------- */
-function checkAndMerge(b, el) {
-  const curRect = { x: b.x, y: b.y, w: el.offsetWidth, h: el.offsetHeight };
-  let target = null, targetEl = null;
+// 探测「即将合并到」的目标块：仅 pending 状态下做这个探测，
+// 因为合并只在 pending 区内触发（跨区走 stage 变更，不做合并）。
+// 阈值口径与 checkAndMerge 保持一致：与源块面积比 > 50% 视为重叠到足够程度。
+// 返回 (o, oEl) 二元组；未命中返回 null。拖拽中每帧调用一次给目标块加高亮，
+// 松手时再调用一次决定是否弹窗确认。
+function findMergeTarget(src, curRect) {
   for (const o of blocks) {
-    if (o.id === b.id) continue;
+    if (o.id === src.id) continue;
     const oEl = board.querySelector(`.block[data-id="${o.id}"]`);
     if (!oEl) continue;
     const oRect = { x: o.x, y: o.y, w: oEl.offsetWidth, h: oEl.offsetHeight };
-    // 重叠面积 > 50% 视为合并
     const ox = Math.max(0, Math.min(curRect.x + curRect.w, oRect.x + oRect.w) - Math.max(curRect.x, oRect.x));
     const oy = Math.max(0, Math.min(curRect.y + curRect.h, oRect.y + oRect.h) - Math.max(curRect.y, oRect.y));
-    const overlapArea = ox * oy;
-    const selfArea = curRect.w * curRect.h;
-    if (overlapArea / selfArea > 0.5) { target = o; targetEl = oEl; break; }
+    if ((ox * oy) / (curRect.w * curRect.h) > 0.5) return [o, oEl];
   }
-  if (!target) return;
+  return null;
+}
+
+function checkAndMerge(b, el) {
+  // 合并只在待完成区触发（跨区走 stage 变更），done/review 段内不做探测
+  if (b.stage !== "todo") return;
+  const curRect = { x: b.x, y: b.y, w: el.offsetWidth, h: el.offsetHeight };
+  const found = findMergeTarget(b, curRect);
+  if (!found) return;
+  const [target, targetEl] = found;
   const preview = target.title.length > 40 ? target.title.slice(0, 40) + "…" : target.title;
   if (!confirm(`确定将此任务合并到「${preview}」吗？\n合并后另一块将被删除，内容追加到目标块。`)) return;
   showMergeHint(el);

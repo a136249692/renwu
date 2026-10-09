@@ -391,6 +391,29 @@ body.is-dragging .bg::after { opacity: 0; }
   will-change: transform;
   contain: layout style paint;
 }
+/* 合并预判：拖拽中实时高亮即将被合并的目标块。
+ * 语义色用红色（合并是"覆盖另一块"的破坏性操作，需要用户明确确认），
+ * 与 accent（蓝）区分开，避免用户误以为只是「对齐/吸附到」目标。
+ * z-index 低于 .block.dragging（10），保证拖动中的块视觉在最上层。 */
+.block.merge-target {
+  border-color: #e5484d !important;
+  box-shadow:
+    0 0 0 3px rgba(229, 72, 77, 0.22),
+    0 0 0 6px rgba(229, 72, 77, 0.08),
+    0 8px 20px rgba(16, 24, 48, 0.10);
+  animation: merge-target-pulse 1s ease-in-out infinite;
+  z-index: 5;
+}
+@keyframes merge-target-pulse {
+  0%, 100% { box-shadow:
+    0 0 0 3px rgba(229, 72, 77, 0.22),
+    0 0 0 6px rgba(229, 72, 77, 0.08),
+    0 8px 20px rgba(16, 24, 48, 0.10); }
+  50% { box-shadow:
+    0 0 0 3px rgba(229, 72, 77, 0.34),
+    0 0 0 8px rgba(229, 72, 77, 0.12),
+    0 8px 20px rgba(16, 24, 48, 0.10); }
+}
 /* 已完成的块整体淡色显示；透明度只作用在文字上，
    避免继承到勾选按钮（opacity 会向下相乘，导致按钮被压暗） */
 .block.done .block-title { color: var(--muted); }
@@ -1442,6 +1465,10 @@ mark {
 }
 .lb-tools button:hover { background: rgba(255,255,255,0.34); }
 .lb-tools #mind-lightbox-zoom-label {
+  min-width: 46px; text-align: center; color: #fff; font-size: 12px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.lb-tools #img-lightbox-zoom-label {
   min-width: 46px; text-align: center; color: #fff; font-size: 12px; font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
