@@ -1777,25 +1777,39 @@ function bindToolbar() {
   if (imageAlignCenterVBtn) imageAlignCenterVBtn.addEventListener("click", () => applyAlignment("center-v"));
 }
 
+/* 页面里是否存在「非折叠的文本选区」（用户框选了可见文字）。
+   用于区分「用户想复制图片」与「用户想复制卡片下方的描述文字」：
+   卡片被点选后 selection.size>0，但用户再框选 .card-caption 里的文字按 Ctrl+C 时，
+   我们不能再劫持这个快捷键去重新复制图片，否则 __glassImgClip 会被刷新成图片，
+   到思维块粘贴时粘出来的还是图片而不是刚复制的文字。 */
+function hasActiveTextSelection() {
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && String(sel.toString() || "").trim()) return true;
+  } catch {}
+  return false;
+}
 /* ---------- 键盘：Delete 删除选中，Ctrl+M 组合选中 ---------- */
 function bindKeyboard() {
   document.addEventListener("keydown", async e => {
     if (!imagePane || imagePane.hidden) return;
     if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
     if (_renaming) return;
+    // 用户框选了可见文字时，Ctrl+C / Ctrl+X 一律走浏览器原生复制，不劫持。
+    const textSelected = hasActiveTextSelection();
     // Ctrl+C / Ctrl+X：图片复制 / 剪切到内部剪贴板。
     // 这里必须放在最前面——浏览器原生 Ctrl+C 在 selection 非空时会把页面上
     // 选中的可见文本复制到系统剪贴板（可能包含任务标题等），我们要把它
-    // 重定向为「复制到图片剪贴板」。有 selection 时才吞掉默认行为。
+    // 重定向为「复制到图片剪贴板」。只有在「卡片被选中且没有文本选区」时才吞掉默认行为。
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "c") {
-      if (selection.size > 0) {
+      if (selection.size > 0 && !textSelected) {
         e.preventDefault();
         copySelection();
         return;
       }
     }
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === "x") {
-      if (selection.size > 0) {
+      if (selection.size > 0 && !textSelected) {
         e.preventDefault();
         cutSelection();
         return;

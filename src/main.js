@@ -941,6 +941,10 @@ function renderFolders() {
     if (pendingCount > 0) li.querySelector(".cnt").textContent = String(pendingCount);
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("star-btn")) return;
+      // 重命名输入框内的点击（定位光标 / 选择文本）不能触发切换任务夹：
+      // selectFolder 会 renderAll() 重建侧栏，把输入框直接销毁并触发 blur，
+      // 用户刚点进改名框就被迫结束编辑。
+      if (e.target.closest(".folder-rename-input")) return;
       if (_foldDragSuppressed) { _foldDragSuppressed = false; return; }
       selectFolder(f.id);
     });
@@ -2539,7 +2543,8 @@ function startDrag(e, el, b) {
         // 待完成区内拖动 → 只更新坐标
         api.moveTask(b.id, b.x, b.y);
         encodePos(el, b);
-        checkAndMerge(b, el);
+        // 合并需用户确认（异步弹窗）：确认后再真正合并。取消则保持块停在落点。
+        void checkAndMerge(b, el);
         // 对齐模式下：pending 块被拖动会打乱堆栈，立即按 y 升序重排回堆栈
         if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
       }
@@ -2586,7 +2591,7 @@ function findMergeTarget(src, curRect) {
   return null;
 }
 
-function checkAndMerge(b, el) {
+async function checkAndMerge(b, el) {
   // 合并只在待完成区触发（跨区走 stage 变更），done/review 段内不做探测
   if (b.stage !== "todo") return;
   const curRect = { x: b.x, y: b.y, w: el.offsetWidth, h: el.offsetHeight };
@@ -2594,7 +2599,14 @@ function checkAndMerge(b, el) {
   if (!found) return;
   const [target, targetEl] = found;
   const preview = target.title.length > 40 ? target.title.slice(0, 40) + "…" : target.title;
-  if (!confirm(`确定将此任务合并到「${preview}」吗？\n合并后另一块将被删除，内容追加到目标块。`)) return;
+  // 原生 confirm 依赖宿主 WebView 的原生对话框能力，在 Tauri 等环境可能弹不出来
+  // （表现为「没提示就直接合并」）。改用应用内确认弹窗，复用 #confirm-modal DOM，
+  // 与删除任务夹保持同一套交互。
+  const ok = await _askConfirmInline(
+    `<b>确定将此任务合并到「${preview}」吗？</b><br>合并后另一块将被删除，内容追加到目标块。`,
+    { title: "合并任务内容", okText: "确认合并" }
+  );
+  if (!ok) return;
   showMergeHint(el);
   const merged = (b.title + "\n" + target.title).trim();
   const oldTitle = target.title;

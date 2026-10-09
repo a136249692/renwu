@@ -514,6 +514,10 @@ function renderMapList() {
       `<button class="rm" title="删除思维导图">×</button>`;
     li.addEventListener("click", e => {
       if (e.target.classList.contains("rm") || e.target.classList.contains("drag-handle")) return;
+      // 重命名输入框内的点击（定位光标 / 选择文本）不能触发切换导图：
+      // setActiveMap 一进来就 finalizeRename()，会把输入框 blur 掉，
+      // 导致用户刚点进改名框就被迫结束编辑，根本来不及改名字。
+      if (e.target.closest(".map-rename-input")) return;
       if (_mapDragSuppressed) { _mapDragSuppressed = false; return; }
       setActiveMap(m.id);
     });
@@ -1000,6 +1004,9 @@ function bindNodeEvents(el, n) {
     e.stopPropagation();
     // 拖动刚结束（真实移动过）→ 屏蔽这次 click，避免误触发编辑
     if (Date.now() < _suppressClickUntil) return;
+    // Ctrl/⌘+点击：选中态已按「切换」语义在 pointerup 里处理过（多选集合是累积的）。
+    // 这里若再 selectNode() 会把刚累积的多选集合重置成单点，导致多选拖不动。
+    if (e.ctrlKey || e.metaKey) return;
     // 单击：仅选中（若处于编辑态则保持编辑，不打断输入）
     if (editingNode && editingNode.id === n.id) return;
     selectNode(n.id);
@@ -1619,11 +1626,12 @@ function downOnNode(e, el, n) {
       renderEdges();
     } else if (isCtrl) {
       // Ctrl/⌘+点（无拖动）：切换当前节点的选中态——按下时先「加入」，此处再根据按下前状态还原
-      if (wasSelectedBefore) {
-        selectedNodeIds.delete(n.id);
-        if (selectedNodeId === n.id && !selectedNodeIds.size) selectedNodeId = null;
-      } else {
-        // 未拖动且按下前未选中 → 保持加入状态（已在 down 里 add 过）
+      if (wasSelectedBefore) selectedNodeIds.delete(n.id);
+      // 锚点若已被移出集合，改指向集合中剩余的第一个节点（或 null），
+      // 否则工具栏/复制会一直指向一个已经取消选中的节点。
+      if (selectedNodeId === n.id && !selectedNodeIds.has(n.id)) {
+        const first = selectedNodeIds.values().next();
+        selectedNodeId = first.done ? null : first.value;
       }
       applyNodeSelectionClasses();
       if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
@@ -1999,6 +2007,15 @@ function bindExternalCopyInvalidatesImageClip() {
     if (cd && cd.getData) {
       try { if ((cd.getData("text/plain") || "").trim()) hasText = true; } catch {}
       if (!hasText) { try { if ((cd.getData("text/html") || "").trim()) hasText = true; } catch {} }
+    }
+    // 兜底：部分 WebView 在 copy 事件里不填充 clipboardData（getData 拿到空串），
+    // 但 window.getSelection() 依然能看到用户框选的文字。据此判定「这是复制文字」，
+    // 避免上一张图的共享剪贴板没被清掉、导致思维块里粘出来还是图片。
+    if (!hasText) {
+      try {
+        const sel = window.getSelection && window.getSelection();
+        if (sel && !sel.isCollapsed && String(sel.toString() || "").trim()) hasText = true;
+      } catch {}
     }
     const ae = document.activeElement;
     const editingText = !!editingNode || !!(ae && ae.isContentEditable);

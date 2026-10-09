@@ -13,6 +13,7 @@ import assert from "node:assert";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const IMG = fs.readFileSync(path.join(ROOT, "src/image-wall.js"), "utf8");
+const MIND = fs.readFileSync(path.join(ROOT, "src/mindmap.js"), "utf8");
 const HTML = fs.readFileSync(path.join(ROOT, "src/index.html"), "utf8");
 
 const results = [];
@@ -26,6 +27,7 @@ function stripComments(src) {
   return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 }
 const IMG_CODE = stripComments(IMG);
+const MIND_CODE = stripComments(MIND);
 
 // ---------- HTML：三个按钮 + 分隔线 ----------
 test("HTML 存在 image-copy / image-cut / image-paste 三个按钮", () => {
@@ -178,6 +180,43 @@ test("bindToolbar 绑定三个按钮的 click 事件", () => {
     "imageCutBtn 未绑定 click → cutSelection");
   assert.ok(/imagePasteBtn\.addEventListener\("click",\s*\(\)\s*=>\s*pasteClipboard/.test(fnBody),
     "imagePasteBtn 未绑定 click → pasteClipboard");
+});
+
+// ---------- BUG 回归：卡片选中后复制卡片下方描述文字，不应被劫持成「复制图片」 ----------
+// 场景：图片夹「仅复制图片」后，卡片仍处于选中态；用户再框选 .card-caption 的文字按
+// Ctrl+C 想复制文字，但旧逻辑只要 selection.size>0 就 preventDefault + copySelection()，
+// 把 __glassImgClip 重新写成图片，导致思维块里粘贴出来的还是图片。
+test("image-wall 定义 hasActiveTextSelection（检测非折叠文本选区）", () => {
+  assert.ok(/function hasActiveTextSelection\s*\(/.test(IMG_CODE), "缺少 hasActiveTextSelection");
+  const b = IMG_CODE.substring(IMG_CODE.indexOf("function hasActiveTextSelection("));
+  assert.ok(/getSelection/.test(b), "应通过 window.getSelection 判定");
+  assert.ok(/isCollapsed/.test(b), "应检查选区是否为折叠态");
+});
+
+test("image-wall Ctrl+C / Ctrl+X 在存在文本选区时不劫持（放行原生复制文字）", () => {
+  assert.ok(/const textSelected\s*=\s*hasActiveTextSelection\(\)/.test(IMG_CODE),
+    "bindKeyboard 应先计算 textSelected");
+  const cBranch = IMG_CODE.substring(
+    IMG_CODE.indexOf('e.key === "c"'),
+    IMG_CODE.indexOf('e.key === "x"')
+  );
+  assert.ok(/selection\.size\s*>\s*0\s*&&\s*!textSelected/.test(cBranch),
+    "Ctrl+C 分支应在「有选中卡片且无文本选区」时才劫持");
+  const xBranch = IMG_CODE.substring(
+    IMG_CODE.indexOf('e.key === "x"'),
+    IMG_CODE.indexOf('e.key === "m"')
+  );
+  assert.ok(/selection\.size\s*>\s*0\s*&&\s*!textSelected/.test(xBranch),
+    "Ctrl+X 分支应在「有选中卡片且无文本选区」时才劫持");
+});
+
+test("mindmap copy 监听器：clipboardData 为空时用 window.getSelection 兜底判定复制文字", () => {
+  const idx = MIND_CODE.indexOf("function bindExternalCopyInvalidatesImageClip(");
+  assert.ok(idx >= 0, "缺少 bindExternalCopyInvalidatesImageClip");
+  const b = MIND_CODE.substring(idx, MIND_CODE.indexOf("async function fallbackPasteClipboardImage("));
+  assert.ok(/getSelection/.test(b), "应使用 window.getSelection 兜底");
+  assert.ok(/isCollapsed/.test(b), "应检查选区折叠态");
+  assert.ok(/window\[SHARED_CLIP_KEY\]\s*=\s*null/.test(b), "命中后应清空共享图片剪贴板");
 });
 
 // ---------- 汇总 ----------
