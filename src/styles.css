@@ -1244,9 +1244,18 @@ mark {
   transition: all 0.18s var(--ease); box-shadow: var(--sh-xs);
 }
 .mind-toolbar button:hover { background: rgba(255,255,255,0.92); box-shadow: var(--sh-sm); }
-.mind-toolbar #mind-zoom-label {
+/* 字号到达上下限时禁用 A−／A＋（禁用态不响应 hover 高亮） */
+.mind-toolbar button:disabled { opacity: 0.4; cursor: not-allowed; }
+.mind-toolbar button:disabled:hover { background: rgba(255,255,255,0.55); box-shadow: var(--sh-xs); }
+.mind-toolbar #mind-zoom-label,
+.mind-toolbar #mind-font-label {
   min-width: 42px; text-align: center; font-size: 12px; color: var(--faint);
   font-variant-numeric: tabular-nums; font-weight: 600;
+}
+/* 工具条内的分组分隔线 */
+.mind-toolbar .tb-sep {
+  width: 1px; height: 16px; margin: 0 4px; flex: none;
+  background: rgba(15,23,42,0.14); border-radius: 1px;
 }
 .mind-canvas {
   position: relative; overflow: hidden; cursor: var(--cursor-grab);
@@ -1277,7 +1286,7 @@ mark {
 .mind-node.selected { border-color: var(--accent); box-shadow: 0 8px 22px rgba(59,110,245,0.22); }
 .mind-node:active { cursor: var(--cursor-grabbing); }
 .mind-node-body {
-  padding: 12px 14px; font-size: 13px; line-height: 1.6; color: #334155;
+  padding: 12px 14px; font-size: var(--mind-node-font, 13px); line-height: 1.6; color: #334155;
   outline: none; min-height: 42px; overflow: auto;
   /* 交互优化：正文本身即是拖拽面 —— 光标从 text 改为 grab/grabbing，
      用户一眼就能看出「这块能拖」。双击才进入编辑，单双击的分工见 mindmap.js。 */

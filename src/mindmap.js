@@ -108,6 +108,9 @@ const mindToolbar = $("mind-toolbar");
 const zoomOutBtn = $("mind-zoom-out");
 const zoomInBtn = $("mind-zoom-in");
 const zoomLabel = $("mind-zoom-label");
+const fontDecBtn = $("mind-font-dec");
+const fontIncBtn = $("mind-font-inc");
+const fontLabel = $("mind-font-label");
 const fitBtn = $("mind-fit");
 const mindCanvas = $("mind-canvas");
 const mindWorld = $("mind-world");
@@ -181,6 +184,9 @@ let lb = { scale: 1, tx: 0, ty: 0, dragging: false, moved: false, list: [], inde
 
 const NODE_W = 210;
 const MIN_ZOOM = 0.25, MAX_ZOOM = 2.5;
+/* 整个导图统一的节点字号（px）。范围与默认值受工具栏 A−／A＋ 钳制，
+   切换导图时从 activeMap.font_size 恢复；与「缩放」相互独立（缩放只改世界变换）。 */
+const MIND_FONT_MIN = 10, MIND_FONT_MAX = 28, MIND_FONT_DEFAULT = 13;
 
 /* ---------- 应用内确认弹窗 ----------
    返回 Promise<boolean>。不用 window.confirm()：原生 confirm 依赖宿主 WebView
@@ -223,7 +229,7 @@ async function apiCreateMap(name) {
   const r = await mi("create_mindmap", { name });
   if (r) return r;
   const id = (_lsIdSeq--); // 负数 id，不与 SQLite 自增冲突
-  const m = { id, name: (name && name.trim()) || "未命名思维导图", created_at: nowTs(), pan_x: 40, pan_y: 40, zoom: 1 };
+  const m = { id, name: (name && name.trim()) || "未命名思维导图", created_at: nowTs(), pan_x: 40, pan_y: 40, zoom: 1, font_size: MIND_FONT_DEFAULT };
   lsMaps.push(m); lsSaveOf(LS_MAPS, lsMaps);
   return m;
 }
@@ -248,6 +254,15 @@ async function apiSaveView(id, x, y, zoom) {
   if (m) { m.pan_x = x; m.pan_y = y; m.zoom = zoom; }
   const lm = lsMaps.find(v => v.id === id);
   if (lm) { lm.pan_x = x; lm.pan_y = y; lm.zoom = zoom; lsSaveOf(LS_MAPS, lsMaps); }
+}
+/* 设置整个导图的统一节点字号：Tauri 端落库 + 浏览器兜底写 localStorage。
+   同时更新内存中的 maps / lsMaps 快照，保证切换导图后能读回。 */
+async function apiUpdateMapFontSize(id, size) {
+  if (isTauri()) await mi("update_mindmap_font_size", { id, fontSize: size });
+  const m = maps.find(v => v.id === id);
+  if (m) m.font_size = size;
+  const lm = lsMaps.find(v => v.id === id);
+  if (lm) { lm.font_size = size; lsSaveOf(LS_MAPS, lsMaps); }
 }
 async function apiListNodes(mapId) {
   const r = await mi("list_mindmap_nodes", { mapId });
@@ -771,6 +786,7 @@ async function setActiveMap(id) {
   }
   activeMapId = id;
   activeMap = id != null ? (maps.find(m => m.id === id) || null) : null;
+  applyMindFontSize();   // 恢复该导图的统一字号（无导图时重置标签/禁用按钮）
   selectedNodeId = null; selectedNodeIds = new Set(); selectedEdgeId = null; editingNode = null;
   clearMindImages();
   renderMapList();
@@ -813,6 +829,23 @@ function renderMindHeader() {
 function applyView() {
   mindWorld.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
   zoomLabel.textContent = Math.round(view.zoom * 100) + "%";
+}
+/* 把当前导图的统一字号写到 CSS 变量上（.mind-node-body 通过 var(--mind-node-font) 取值），
+   并同步工具栏标签与 A−／A＋ 的可用状态。切换导图/调整字号后都要调用。 */
+function applyMindFontSize() {
+  const size = (activeMap && activeMap.font_size) ? activeMap.font_size : MIND_FONT_DEFAULT;
+  mindWorld.style.setProperty("--mind-node-font", size + "px");
+  if (fontLabel) fontLabel.textContent = size + "px";
+  if (fontDecBtn) fontDecBtn.disabled = !activeMap || size <= MIND_FONT_MIN;
+  if (fontIncBtn) fontIncBtn.disabled = !activeMap || size >= MIND_FONT_MAX;
+}
+/* 调整当前导图字号（钳制到 [MIN,MAX] 并取整），立即生效并持久化。 */
+function setMindFontSize(size) {
+  if (!activeMap) return;
+  const s = Math.max(MIND_FONT_MIN, Math.min(MIND_FONT_MAX, Math.round(size)));
+  activeMap.font_size = s;
+  applyMindFontSize();
+  apiUpdateMapFontSize(activeMap.id, s);
 }
 function renderMindCanvas() {
   applyView();
@@ -1915,6 +1948,12 @@ function bindToolbar() {
   zoomInBtn.addEventListener("click", e => zoomBy(1.1, e.clientX, e.clientY));
   zoomOutBtn.addEventListener("click", e => zoomBy(0.9091, e.clientX, e.clientY));
   fitBtn.addEventListener("click", fitView);
+  if (fontDecBtn) fontDecBtn.addEventListener("click", () => {
+    if (activeMap) setMindFontSize((activeMap.font_size || MIND_FONT_DEFAULT) - 1);
+  });
+  if (fontIncBtn) fontIncBtn.addEventListener("click", () => {
+    if (activeMap) setMindFontSize((activeMap.font_size || MIND_FONT_DEFAULT) + 1);
+  });
   if (mindCopyBlockBtn) mindCopyBlockBtn.addEventListener("click", () => {
     if (selectedNodeId == null) { toast("请先选中一个思维块再复制", 2600); return; }
     copyMindBlock(selectedNodeId);

@@ -63,6 +63,8 @@ pub struct Mindmap {
     pub pan_x: f64,
     pub pan_y: f64,
     pub zoom: f64,
+    /// 整个导图统一的节点字号（px）。所有节点共用，切换导图各自记忆。
+    pub font_size: i64,
 }
 
 /// 思维导图内的节点（内容块）
@@ -162,7 +164,8 @@ pub fn init_db(db_path: &std::path::Path) -> Connection {
             created_at INTEGER NOT NULL,
             pan_x REAL DEFAULT 40,
             pan_y REAL DEFAULT 40,
-            zoom REAL DEFAULT 1.0
+            zoom REAL DEFAULT 1.0,
+            font_size INTEGER DEFAULT 13
         );
         CREATE TABLE IF NOT EXISTS mindmap_nodes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -265,6 +268,15 @@ fn migrate(conn: &Connection) {
         );",
     )
     .expect("Failed to create task_history");
+    // mindmaps.font_size：整个导图统一的节点字号（px），旧库补列，默认 13。
+    let has_font = conn
+        .prepare("SELECT font_size FROM mindmaps LIMIT 0")
+        .map(|_| true)
+        .unwrap_or(false);
+    if !has_font {
+        conn.execute_batch("ALTER TABLE mindmaps ADD COLUMN font_size INTEGER DEFAULT 13;")
+            .expect("Failed to migrate mindmaps (font_size)");
+    }
 }
 
 // ---------- Folders ----------
@@ -661,7 +673,8 @@ pub fn list_task_history(conn: &Connection, task_id: i64) -> Result<Vec<TaskHist
 pub fn list_mindmaps(conn: &Connection) -> Result<Vec<Mindmap>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, created_at, pan_x, pan_y, zoom
+            "SELECT id, name, created_at, pan_x, pan_y, zoom,
+                    COALESCE(font_size, 13)
              FROM mindmaps ORDER BY created_at ASC, id ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -674,6 +687,7 @@ pub fn list_mindmaps(conn: &Connection) -> Result<Vec<Mindmap>, String> {
                 pan_x: row.get(3)?,
                 pan_y: row.get(4)?,
                 zoom: row.get(5)?,
+                font_size: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -702,6 +716,7 @@ pub fn create_mindmap(conn: &Connection, name: &str) -> Result<Mindmap, String> 
         pan_x: 40.0,
         pan_y: 40.0,
         zoom: 1.0,
+        font_size: 13,
     })
 }
 
@@ -722,6 +737,16 @@ pub fn update_mindmap_view(conn: &Connection, id: i64, pan_x: f64, pan_y: f64, z
     conn.execute(
         "UPDATE mindmaps SET pan_x = ?1, pan_y = ?2, zoom = ?3 WHERE id = ?4",
         rusqlite::params![pan_x, pan_y, zoom, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 设置整个导图的统一节点字号（px）。取值范围由命令层/前端钳制，这里只负责落库。
+pub fn update_mindmap_font_size(conn: &Connection, id: i64, font_size: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mindmaps SET font_size = ?1 WHERE id = ?2",
+        rusqlite::params![font_size, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())

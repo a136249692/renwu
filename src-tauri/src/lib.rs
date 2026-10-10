@@ -45,6 +45,7 @@ pub fn run() {
             create_mindmap,
             rename_mindmap,
             update_mindmap_view,
+            update_mindmap_font_size,
             delete_mindmap,
             list_mindmap_nodes,
             create_mindmap_node,
@@ -285,6 +286,12 @@ fn rename_mindmap(state: DbState, id: i64, name: String) -> Result<(), String> {
 fn update_mindmap_view(state: DbState, id: i64, pan_x: f64, pan_y: f64, zoom: f64) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
     db::update_mindmap_view(&conn, id, pan_x, pan_y, zoom)
+}
+
+#[tauri::command]
+fn update_mindmap_font_size(state: DbState, id: i64, font_size: i64) -> Result<(), String> {
+    let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
+    db::update_mindmap_font_size(&conn, id, font_size)
 }
 
 #[tauri::command]
