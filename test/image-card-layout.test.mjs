@@ -17,6 +17,7 @@ import assert from "node:assert";
 const ROOT = path.resolve(import.meta.dirname, "..");
 const IMG = fs.readFileSync(path.join(ROOT, "src/image-wall.js"), "utf8");
 const CSS = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
+const HTML = fs.readFileSync(path.join(ROOT, "src/index.html"), "utf8");
 
 const results = [];
 function test(name, fn) {
@@ -83,6 +84,37 @@ test("card-img 使用 object-fit: contain，完整显示不裁切", () => {
   assert.ok(/object-fit:\s*contain/.test(body), "图片必须 contain 显示");
   assert.ok(/width:\s*100%/.test(body) && /height:\s*100%/.test(body),
     "图片应铺满 wrap 的宽高，再由 contain 内部等比留白");
+});
+
+// ---------- 自动整理：消除组内重叠 ----------
+
+test("工具栏提供「整理」按钮，选中 ≥2 张时可用", () => {
+  assert.ok(/id="image-tidy"/.test(HTML), "图片工具栏应有整理按钮");
+  const sync = IMG_CODE.slice(IMG_CODE.indexOf("function syncImageToolbarBtns"));
+  const body = sync.slice(0, sync.indexOf("\n}\n") + 3);
+  assert.ok(/imageTidyBtn\.hidden = selection\.size < 2/.test(body),
+    "只在选中 ≥2 张时显示整理按钮");
+});
+
+test("自动整理按网格排开、单元格含描述栏高度，保证不重叠", () => {
+  const fn = IMG_CODE.slice(IMG_CODE.indexOf("function autoArrangeSelection"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.ok(/Math\.ceil\(Math\.sqrt\(ordered\.length\)\)/.test(body),
+    "应按近似方形网格分列");
+  assert.ok(/const cellW = Math\.max/.test(body) && /const cellH = Math\.max/.test(body),
+    "单元格应取选中项的最大尺寸");
+  assert.ok(/\+ BG_CAPTION_H/.test(body), "行高必须包含底部描述栏，否则仍会压到下一张");
+  assert.ok(/\(i % cols\) \* \(cellW \+ GAP\)/.test(body) &&
+    /Math\.floor\(i \/ cols\) \* \(cellH \+ GAP\)/.test(body),
+    "应按列/行 + 间距定位");
+  assert.ok(/apiUpdateItem\(/.test(body), "整理后应落盘");
+});
+
+test("大组内的图片不参与手动整理（避免被容器重排覆盖）", () => {
+  const fn = IMG_CODE.slice(IMG_CODE.indexOf("function autoArrangeSelection"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.ok(/bigGroupForGroup\(gid\)/.test(body) && /请先拖出大组再整理/.test(body),
+    "大组内图片应提示先拖出再整理");
 });
 
 // ---------- 输出 ----------

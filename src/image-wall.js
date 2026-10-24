@@ -231,6 +231,7 @@ const imageCombineBtn = $("image-combine");
 const imageUncombineBtn = $("image-uncombine");
 const imageGroupBtn   = $("image-group");
 const imageUngroupBtn = $("image-ungroup");
+const imageTidyBtn    = $("image-tidy");
 const imageAlignLeftBtn    = $("align-left");
 const imageAlignRightBtn   = $("align-right");
 const imageAlignTopBtn     = $("align-top");
@@ -615,6 +616,11 @@ function syncImageToolbarBtns() {
   syncGroupBtns();
   syncAlignBtns();
   syncClipboardBtns();
+  // 整理按钮：选中 ≥2 张即可用（组内图片点选一张会连带整组选中）
+  if (imageTidyBtn) {
+    imageTidyBtn.hidden = selection.size < 2;
+    if (selection.size >= 2) imageTidyBtn.title = `自动整理选中的 ${selection.size} 张：按网格排开，消除重叠`;
+  }
 }
 /* ---------- 分组 / 解散按钮显隐 ---------- */
 function syncGroupBtns() {
@@ -708,6 +714,8 @@ function createBigGroup() {
     y: Math.round(cy - 150),
     w,
     h: 300,
+    // cols：容器内每个分组的显示列数（0=按图片原尺寸自适应，默认 3 列便于横向对比）
+    cols: 3,
     // autoH：高度由内容自动撑开/回缩；用户手动拖过右下角后置 false，尊重手动尺寸
     autoH: true,
     groupIds: [],
@@ -723,31 +731,62 @@ function layoutBigGroup(bg, opts = {}) {
   const save = opts.save !== false;
   const subW = Math.max(220, bg.w - BG_PAD * 2);
   const innerW = Math.max(120, subW - BG_SUB_PAD * 2);
+  // cols >= 2 时按固定列数排列：单元格统一尺寸，同一组的图片并排成网格，
+  // 方便横向对比；0 / 1 则沿用「按图片原尺寸自适应换行」的旧行为。
+  const cols = Math.max(0, Math.round(Number(bg.cols) || 0));
   let cursorY = bg.y + BG_HEAD_H + BG_PAD;
   for (const gid of bg.groupIds || []) {
     const members = getGroupItemObjects(gid);
     if (!members.length) continue;
     const contentTop = cursorY + BG_SUB_LABEL_H + BG_SUB_PAD;
-    let cx = bg.x + BG_PAD + BG_SUB_PAD;
-    let rowTop = 0;
-    let rowH = 0;
-    for (const it of members) {
-      const w = Math.max(80, it.width || CARD_DEFAULT_W);
-      const h = Math.max(60, it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
-      if (cx > bg.x + BG_PAD + BG_SUB_PAD && cx + w > bg.x + BG_PAD + BG_SUB_PAD + innerW) {
-        cx = bg.x + BG_PAD + BG_SUB_PAD;
-        rowTop += rowH + BG_ITEM_GAP;
-        rowH = 0;
+    let contentH = 0;
+    if (cols >= 2) {
+      // 组内张数少于列数时按实际张数取列，避免留空槽把图挤小
+      const effCols = Math.min(cols, members.length);
+      const cellW = Math.floor((innerW - BG_ITEM_GAP * (effCols - 1)) / effCols);
+      // 图片区固定 4:3 单元格，img 用 contain 完整显示，不会裁切
+      const cellH = Math.round(cellW * 3 / 4);
+      members.forEach((it, i) => {
+        const col = i % effCols;
+        const row = Math.floor(i / effCols);
+        it.width = cellW;
+        it.height = cellH;
+        it.x = bg.x + BG_PAD + BG_SUB_PAD + col * (cellW + BG_ITEM_GAP);
+        it.y = contentTop + row * (cellH + BG_CAPTION_H + BG_ITEM_GAP);
+        const el = itemEls.get(it.id);
+        if (el) {
+          el.style.left = it.x + "px";
+          el.style.top = it.y + "px";
+          el.style.width = cellW + "px";
+          const wrapEl = el.querySelector(".card-img-wrap");
+          if (wrapEl) wrapEl.style.height = cellH + "px";
+        }
+        if (save) debouncedSaveItem(it.id);
+      });
+      const rows = Math.ceil(members.length / effCols);
+      contentH = rows * (cellH + BG_CAPTION_H) + (rows - 1) * BG_ITEM_GAP;
+    } else {
+      let cx = bg.x + BG_PAD + BG_SUB_PAD;
+      let rowTop = 0;
+      let rowH = 0;
+      for (const it of members) {
+        const w = Math.max(80, it.width || CARD_DEFAULT_W);
+        const h = Math.max(60, it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
+        if (cx > bg.x + BG_PAD + BG_SUB_PAD && cx + w > bg.x + BG_PAD + BG_SUB_PAD + innerW) {
+          cx = bg.x + BG_PAD + BG_SUB_PAD;
+          rowTop += rowH + BG_ITEM_GAP;
+          rowH = 0;
+        }
+        it.x = cx;
+        it.y = contentTop + rowTop;
+        const el = itemEls.get(it.id);
+        if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+        cx += w + BG_ITEM_GAP;
+        rowH = Math.max(rowH, h);
+        if (save) debouncedSaveItem(it.id);
       }
-      it.x = cx;
-      it.y = contentTop + rowTop;
-      const el = itemEls.get(it.id);
-      if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
-      cx += w + BG_ITEM_GAP;
-      rowH = Math.max(rowH, h);
-      if (save) debouncedSaveItem(it.id);
+      contentH = rowH > 0 ? rowTop + rowH : 0;
     }
-    const contentH = rowH > 0 ? rowTop + rowH : 0;
     cursorY = contentTop + contentH + BG_SUB_PAD + BG_PAD;
   }
   const needed = Math.round(cursorY - bg.y);
@@ -786,7 +825,7 @@ function renderBigGroupSubs(bg, el) {
   const nameEl = el.querySelector(".big-group-name");
   const metaEl = el.querySelector(".big-group-meta");
   if (!body) return;
-  if (nameEl) nameEl.textContent = bg.name || "大组";
+  if (nameEl && nameEl.contentEditable !== "true") nameEl.textContent = bg.name || "大组";
   let total = 0;
   const parts = [];
   (bg.groupIds || []).forEach((gid, idx) => {
@@ -824,7 +863,18 @@ function createBigGroupEl(bg) {
   el.dataset.bgid = bg.id;
   el.innerHTML = `
     <div class="big-group-head">
-      <span class="big-group-name">${esc(bg.name || "大组")}</span>
+      <span class="big-group-name" title="双击可重命名">${esc(bg.name || "大组")}</span>
+      <button class="big-group-rename" type="button" title="重命名大组" aria-label="重命名大组">✎</button>
+      <label class="big-group-cols" title="每个分组显示几列（自适应=按原尺寸换行）">
+        <select aria-label="大组列数">
+          <option value="0">自适应</option>
+          <option value="2">2 列</option>
+          <option value="3">3 列</option>
+          <option value="4">4 列</option>
+          <option value="5">5 列</option>
+          <option value="6">6 列</option>
+        </select>
+      </label>
       <span class="big-group-meta"></span>
       <button class="big-group-del" type="button" title="删除大组（只删容器，图片保留）">×</button>
     </div>
@@ -840,10 +890,14 @@ function bindBigGroupEvents(el, bg) {
   const body = el.querySelector(".big-group-body");
   const resize = el.querySelector(".big-group-resize");
   const del = el.querySelector(".big-group-del");
+  const nameEl = el.querySelector(".big-group-name");
+  const renameBtn = el.querySelector(".big-group-rename");
+  const colsSel = el.querySelector(".big-group-cols select");
 
   // 拖动标题栏：容器与组内图片整体平移
   head.addEventListener("mousedown", e => {
-    if (e.target.closest(".big-group-del")) return;
+    // 交互控件（删除 / 列数下拉 / 重命名按钮 / 正在编辑的名称）不触发拖动
+    if (e.target.closest(".big-group-del, .big-group-cols, .big-group-rename, .big-group-name[contenteditable='true']")) return;
     e.preventDefault();
     e.stopPropagation();
     const sx = e.clientX, sy = e.clientY;
@@ -899,6 +953,35 @@ function bindBigGroupEvents(el, bg) {
     document.addEventListener("mouseup", up);
   });
 
+  // 重命名：双击名称或点 ✎ 进入行内编辑，Enter/失焦保存，Esc 取消
+  if (nameEl) {
+    nameEl.addEventListener("dblclick", e => {
+      e.stopPropagation();
+      startBigGroupRename(bg, nameEl);
+    });
+  }
+  if (renameBtn) {
+    renameBtn.addEventListener("mousedown", e => e.stopPropagation());
+    renameBtn.addEventListener("click", e => {
+      e.stopPropagation();
+      if (nameEl) startBigGroupRename(bg, nameEl);
+    });
+  }
+
+  // 列数：每个分组内部按 N 列网格排列，切换后立即重排并持久化
+  if (colsSel) {
+    colsSel.value = String(bg.cols == null ? 3 : bg.cols);
+    colsSel.addEventListener("mousedown", e => e.stopPropagation());
+    colsSel.addEventListener("change", e => {
+      e.stopPropagation();
+      bg.cols = Number(colsSel.value) || 0;
+      layoutBigGroup(bg, { persist: false });
+      persistBigGroups();
+      renderBigGroups();
+      toast(bg.cols ? `已按 ${bg.cols} 列显示` : "已切换为自适应排列", 1800);
+    });
+  }
+
   del.addEventListener("mousedown", e => e.stopPropagation());
   del.addEventListener("click", e => {
     e.stopPropagation();
@@ -922,6 +1005,42 @@ function bindBigGroupEvents(el, bg) {
     e.stopPropagation();
     const sub = play.closest(".big-group-sub");
     if (sub) openSlideshow(sub.dataset.gid);
+  });
+}
+
+// 大组重命名：名称行内编辑，Enter/失焦保存，Esc 取消
+function startBigGroupRename(bg, nameEl) {
+  if (!nameEl || nameEl.contentEditable === "true") return;
+  nameEl.contentEditable = "true";
+  nameEl.classList.add("editing");
+  _renaming = true;
+  nameEl.focus();
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(nameEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  } catch {}
+  let done = false;
+  const finish = save => {
+    if (done) return;
+    done = true;
+    _renaming = false;
+    nameEl.contentEditable = "false";
+    nameEl.classList.remove("editing");
+    const v = String(nameEl.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    if (save && v) bg.name = v;
+    nameEl.textContent = bg.name || "大组";
+    if (save && v) {
+      persistBigGroups();
+      toast(`已重命名为「${bg.name}」`, 2000);
+    }
+  };
+  nameEl.addEventListener("blur", () => finish(true), { once: true });
+  nameEl.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") { ev.preventDefault(); finish(true); nameEl.blur(); }
+    else if (ev.key === "Escape") { ev.preventDefault(); finish(false); nameEl.blur(); }
   });
 }
 
@@ -1089,6 +1208,41 @@ function applyAlignment(which) {
   }
   const label = { "left":"左对齐","right":"右对齐","top":"上对齐","bottom":"下对齐","center-h":"水平居中","center-v":"垂直居中" }[which] || "对齐";
   toast(`${label}（${sel.length} 张）`);
+}
+/* ---------- 自动整理：把选中的图片按网格排开，消除重叠 ----------
+   用户反馈：分组后图片可能互相叠在一起。这里按「上→下、左→右」的阅读顺序
+   重排到一张网格里，单元格取选中项的最大尺寸，因此任何两张都不会重叠。
+   大组内的图片由容器自动排版，不允许手动整理（否则会被容器重排覆盖）。 */
+function autoArrangeSelection() {
+  const sel = items.filter(it => selection.has(it.id));
+  if (sel.length < 2) { toast("请至少选中 2 张图片再整理", 2500); return; }
+  const inBig = sel.find(it => {
+    const gid = groupForItem(it.id);
+    return gid && bigGroupForGroup(gid);
+  });
+  if (inBig) { toast("大组内的图片由容器自动排列，请先拖出大组再整理", 3000); return; }
+
+  const GAP = 16;
+  const ordered = sel.slice().sort((a, b) => {
+    const dy = a.y - b.y;
+    if (Math.abs(dy) > 40) return dy;
+    return a.x - b.x;
+  });
+  const minX = Math.min(...sel.map(it => it.x));
+  const minY = Math.min(...sel.map(it => it.y));
+  const cellW = Math.max(...sel.map(it => it.width || CARD_DEFAULT_W));
+  const cellH = Math.max(...sel.map(it => (it.height || CARD_DEFAULT_W) + BG_CAPTION_H));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+  ordered.forEach((it, i) => {
+    const w = it.width || CARD_DEFAULT_W;
+    const h = it.height || CARD_DEFAULT_W;
+    it.x = Math.round(minX + (i % cols) * (cellW + GAP));
+    it.y = Math.round(minY + Math.floor(i / cols) * (cellH + GAP));
+    const el = itemEls.get(it.id);
+    if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+    apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+  });
+  toast(`已自动整理 ${sel.length} 张（${cols} 列，无重叠）`, 2200);
 }
 function bringToFront(it) {
   // 分组语义：把整组都拉到前面，否则组内 z 序会乱
@@ -2384,6 +2538,7 @@ function bindToolbar() {
   if (imageUncombineBtn) imageUncombineBtn.addEventListener("click", () => uncombineSelected());
   if (imageGroupBtn) imageGroupBtn.addEventListener("click", () => groupSelected());
   if (imageUngroupBtn) imageUngroupBtn.addEventListener("click", () => ungroupSelected());
+  if (imageTidyBtn)    imageTidyBtn.addEventListener("click",    () => autoArrangeSelection());
   if (imageAlignLeftBtn)    imageAlignLeftBtn.addEventListener("click", () => applyAlignment("left"));
   if (imageAlignRightBtn)   imageAlignRightBtn.addEventListener("click", () => applyAlignment("right"));
   if (imageAlignTopBtn)     imageAlignTopBtn.addEventListener("click", () => applyAlignment("top"));

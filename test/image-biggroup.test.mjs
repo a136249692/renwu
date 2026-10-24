@@ -86,6 +86,40 @@ test("大组默认名称与尺寸", () => {
   assert.ok(/groupIds: \[\]/.test(body), "新建时组列表应为空");
 });
 
+test("大组支持行内重命名（双击或 ✎，Enter 保存、Esc 取消）", () => {
+  const el = fnBody("createBigGroupEl");
+  assert.ok(/class="big-group-name"/.test(el), "名称应是可编辑的文本节点");
+  assert.ok(/class="big-group-rename"/.test(el), "标题栏应提供 ✎ 重命名按钮");
+  const fn = fnBody("startBigGroupRename");
+  assert.ok(/contentEditable = "true"/.test(fn), "进入编辑应开启 contentEditable");
+  assert.ok(/ev\.key === "Enter"/.test(fn), "Enter 应保存");
+  assert.ok(/ev\.key === "Escape"/.test(fn), "Esc 应取消");
+  assert.ok(/persistBigGroups\(\)/.test(fn), "改名后应持久化");
+  assert.ok(/nameEl\.contentEditable !== "true"/.test(fnBody("renderBigGroupSubs")),
+    "重绘时不应覆盖正在编辑的名称");
+});
+
+test("大组列数设置：默认 3 列、下拉切换后重排并持久化", () => {
+  assert.ok(/cols: 3/.test(fnBody("createBigGroup")), "新大组默认 3 列");
+  const ev = fnBody("bindBigGroupEvents");
+  assert.ok(/big-group-cols select/.test(ev), "标题栏应有列数下拉");
+  assert.ok(/bg\.cols = Number\(colsSel\.value\) \|\| 0/.test(ev), "切换列数应写回 bg.cols");
+  assert.ok(/layoutBigGroup\(bg, \{ persist: false \}\)/.test(ev), "切换后应立即重排");
+  assert.ok(/persistBigGroups\(\)/.test(ev), "列数应持久化");
+});
+
+test("固定列数时同组图片按网格并排、单元格统一尺寸（方便对比）", () => {
+  const body = fnBody("layoutBigGroup");
+  assert.ok(/const cols = Math\.max\(0, Math\.round\(Number\(bg\.cols\) \|\| 0\)\)/.test(body),
+    "应读取大组的 cols");
+  assert.ok(/const effCols = Math\.min\(cols, members\.length\)/.test(body),
+    "列数多于图片数时按实际张数取列");
+  assert.ok(/it\.width = cellW/.test(body) && /it\.height = cellH/.test(body),
+    "同一组的图片应统一单元格尺寸");
+  assert.ok(/const col = i % effCols/.test(body) && /const row = Math\.floor\(i \/ effCols\)/.test(body),
+    "应按列/行定位，保证并排不重叠");
+});
+
 // ---------- 拖组入大组 ----------
 
 test("把已分组的图片拖进大组容器 → 整组加入", () => {
