@@ -116,7 +116,8 @@ jobs:
           echo "create tag ${TAG} -> HTTP ${code}"
           if [ "${code}" == "201" ]; then
             echo "tag created"
-          elif [ "${code}" == "200" ] || [ "${code}" == "204" ]; then
+          elif [ "${code}" == "200" ] || [ "${code}" == "204" ] || [ "${code}" == "409" ]; then
+            # 409 = tag 已存在（重跑/重复发布都会走到这里），属于幂等正常情况
             echo "tag already exists (OK)"
           else
             echo "unexpected: $(head -c 300 /tmp/tagresp)"; exit 1
