@@ -113,12 +113,19 @@ test("缩略图支持移除（removeNodeImage）", () => {
 });
 
 // ---------- 加图入口 ----------
-test("每个节点都有「＋ 图片」入口，点击打开文件选择框", () => {
+test("加图入口在工具栏：选中思维块后才显示，内容块内不再常驻按钮", () => {
   const b = fnBody(CODE, "function pickImagesForNode(");
   assert.ok(/_pendingImgNodeId\s*=\s*nodeId/.test(b), "应记录目标节点");
   assert.ok(/mindImageInput\.click\(\)/.test(b), "应触发文件选择框");
   const r = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/makeAddImgBtn\(/.test(r), "节点内应渲染加图按钮");
+  assert.ok(!/makeAddImgBtn\(/.test(r), "内容块内不应再渲染常驻加图按钮");
+  assert.ok(/id="mind-add-img"/.test(HTML), "工具栏应有「上传图片」按钮");
+  const s = fnBody(CODE, "function syncMindToolbarBtns(");
+  assert.ok(/mindAddImgBtn\.hidden\s*=\s*!\(activeMap && selectedNodeId != null\)/.test(s),
+    "上传按钮只在选中节点时显示");
+  const t = fnBody(CODE, "function bindToolbar(");
+  assert.ok(/mindAddImgBtn\.addEventListener\("click"/.test(t), "上传按钮应绑定点击事件");
+  assert.ok(/pickImagesForNode\(selectedNodeId\)/.test(t), "点击后应对选中的节点打开文件选择框");
 });
 
 test("addImagesToNode 多选逐张保存，且有大小/空图校验", () => {
@@ -208,6 +215,38 @@ test("删除节点图片前先弹 askConfirm，取消则不执行删除", () => 
 test("CSS：画廊为一行多列（flex nowrap + 横向滚动）", () => {
   assert.ok(/\.mind-node-gallery\s*\{[^}]*flex-wrap:\s*nowrap/.test(CSS));
   assert.ok(/\.mind-node-gallery\s*\{[^}]*overflow-x:\s*auto/.test(CSS));
+});
+
+// ---------- 布局：正文在左、图片在右 ----------
+
+test("CSS：有图片的节点改为横向布局（正文在左、图片在右）", () => {
+  const start = CSS.indexOf(".mind-node.has-imgs {");
+  assert.ok(start > 0, "缺少 .mind-node.has-imgs 规则");
+  const block = CSS.slice(start, CSS.indexOf("}", start));
+  assert.ok(/flex-direction:\s*row/.test(block), "节点应横向排列，图片不再压在正文下方");
+  assert.ok(!/width:\s*auto/.test(block),
+    "不能用 width:auto：节点在 0 宽度的 .mind-world 里会收缩成窄条，宽度应由 JS 下发");
+  assert.ok(/max-width:\s*560px/.test(block), "应限制节点最大宽度");
+  const i = CSS.indexOf(".mind-node.has-imgs .mind-node-imgs {");
+  assert.ok(i > 0, "缺少图片区在横向布局下的规则");
+  assert.ok(/margin-top:\s*0/.test(CSS.slice(i, CSS.indexOf("}", i))),
+    "图片区不应再保留「正文下方」的上移量");
+});
+
+test("渲染：有图片时加 has-imgs，并按张数下发节点宽度", () => {
+  const b = fnBody(CODE, "function renderNodeImages");
+  assert.ok(/classList\.toggle\("has-imgs",\s*list\.length\s*>\s*0\)/.test(b),
+    "应按是否有图片切换 has-imgs");
+  assert.ok(/el\.style\.width\s*=\s*""/.test(b), "没有图片时应恢复默认宽度");
+  assert.ok(/210\s*\+\s*26\s*\+\s*Math\.max/.test(b), "展开态宽度应按缩略图张数撑开");
+});
+
+test("连线端点 / 命中测试 / fitView 使用实测节点宽度", () => {
+  assert.ok(/function nodeWidth\(n\)/.test(CODE), "缺少 nodeWidth 宽度测量函数");
+  assert.ok(/nodeWidth\(n\)/.test(fnBody(CODE, "function nodeCenter")), "nodeCenter 应按实测宽度取中心");
+  assert.ok(/const w = nodeWidth\(n\)/.test(fnBody(CODE, "function edgePointOn")), "连线端点应贴实测右边界");
+  assert.ok(/nodeWidth\(n\)/.test(fnBody(CODE, "function hitTestNode")), "命中测试应覆盖变宽后的节点");
+  assert.ok(/nodeWidth\(n\)/.test(fnBody(CODE, "function fitView")), "fitView 边界应按实测宽度计算");
 });
 
 test("CSS：存在灯箱与缩略图样式", () => {
@@ -381,7 +420,9 @@ test("appendPasteBtn 仅在剪贴板非空时追加「粘贴」按钮", () => {
   assert.ok(/mind-node-paste-img/.test(b), "缺少粘贴按钮样式类");
   assert.ok(/pasteNodeImages\(nodeId\)/.test(b), "点击应触发粘贴");
   const r = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/appendPasteBtn\(/.test(r), "各节点操作条应追加粘贴按钮");
+  assert.ok(/appendNodeImgBar\(/.test(r), "各节点图片区应通过操作条追加粘贴按钮");
+  const bar = fnBody(CODE, "function appendNodeImgBar(");
+  assert.ok(/appendPasteBtn\(/.test(bar), "操作条只承载粘贴按钮（加图在工具栏）");
 });
 
 test("paste 事件在无外部图片时回退到应用内剪贴板", () => {
@@ -455,7 +496,7 @@ test("思维图片不提供下载：封面/缩略图/灯箱均禁用右键另存
   assert.ok(/draggable = false/.test(b), "应设置 draggable=false");
   assert.ok(/contextmenu/.test(b), "应禁用原生右键「另存为/下载」菜单");
   assert.ok(/dragstart/.test(b), "应禁用拖拽保存");
-  const r = CODE.substring(CODE.indexOf("function renderNodeImages("), CODE.indexOf("function makeAddImgBtn("));
+  const r = CODE.substring(CODE.indexOf("function renderNodeImages("), CODE.indexOf("function appendNodeImgBar("));
   assert.ok(/forbidImageDownload\(img\)/.test(r), "封面/缩略图应套用 forbidImageDownload");
   const lb = CODE.substring(CODE.indexOf("function bindLightbox("), CODE.indexOf("function bindImagePaste("));
   assert.ok(/forbidImageDownload\(mindLightboxImg\)/.test(lb), "灯箱图应套用 forbidImageDownload");

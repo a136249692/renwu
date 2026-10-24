@@ -68,7 +68,9 @@ test("面板位于图标上方且 hidden 时真正隐藏", () => {
 });
 
 test("编辑器可滚动并带占位文案", () => {
-  const block = cssBlock(".image-note-editor");
+  // 取独立的 .image-note-editor 规则（避开 .image-note-panel.expanded 前缀的修饰规则）
+  const i = CSS_CODE.indexOf("\n.image-note-editor {");
+  const block = i < 0 ? "" : CSS_CODE.slice(i, CSS_CODE.indexOf("}", i) + 1);
   assert.ok(/overflow-y:\s*auto/.test(block), "长笔记应可滚动");
   assert.ok(/content:\s*attr\(data-placeholder\)/.test(CSS_CODE), "应显示 placeholder");
 });
@@ -123,6 +125,47 @@ test("粘贴/拖入笔记时转为纯文本，避免外部 HTML 注入", () => {
 test("init 中完成笔记事件绑定", () => {
   const init = JS_CODE.slice(JS_CODE.indexOf("function init()"));
   assert.ok(/bindNote\(\)/.test(init), "init 应调用 bindNote");
+});
+
+// ---------- 放大编辑 ----------
+
+test("笔记标题栏提供「放大」按钮与遮罩层", () => {
+  assert.ok(/id="image-note-expand"/.test(HTML), "缺少 #image-note-expand 放大按钮");
+  const head = HTML.slice(HTML.indexOf('class="image-note-head"'), HTML.indexOf('class="image-note-tools"'));
+  assert.ok(/id="image-note-expand"[\s\S]*?title="放大编辑笔记"/.test(head), "放大按钮应带说明 title");
+  assert.ok(/id="image-note-backdrop"[^>]*hidden/.test(HTML), "遮罩层默认隐藏");
+});
+
+test("放大态是画布中央的大窗口（absolute 居中 + 宽高放大）", () => {
+  const block = cssBlock(".image-note-panel.expanded");
+  // 用 absolute 而非 fixed：画布祖先的 backdrop-filter 会让 fixed 以画布为包含块并被裁切
+  assert.ok(/position:\s*absolute/.test(block), "放大态应相对画布绝对定位");
+  assert.ok(/translate\(-50%,\s*-50%\)/.test(block), "应居中对齐");
+  assert.ok(/width:\s*min\(880px/.test(block), "宽度应放大");
+  assert.ok(/height:\s*min\(760px/.test(block), "高度应放大");
+  const bd = cssBlock(".image-note-backdrop");
+  assert.ok(/position:\s*absolute/.test(bd) && /inset:\s*0/.test(bd), "遮罩应铺满画布");
+  const panel = CSS_CODE.indexOf(".image-note-panel.expanded");
+  const backdrop = CSS_CODE.indexOf(".image-note-backdrop");
+  assert.ok(cssBlock(".image-note-panel").length > 0 && panel < backdrop, "放大态样式应作用于面板本体");
+});
+
+test("放大按钮切换 expanded 类与 aria-pressed，并同步遮罩", () => {
+  const fn = JS_CODE.slice(JS_CODE.indexOf("function setNoteExpanded"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  assert.ok(/classList\.toggle\("expanded"/.test(body), "应切换 expanded 类");
+  assert.ok(/noteBackdrop\.hidden = !next/.test(body), "遮罩显隐应与放大态同步");
+  assert.ok(/aria-pressed/.test(body), "应同步 aria-pressed");
+  assert.ok(/setNoteExpanded\(!notePanel\.classList\.contains\("expanded"\)\)/.test(JS_CODE),
+    "按钮点击应为切换语义");
+});
+
+test("收起面板与 Esc 都会退出放大态", () => {
+  const close = JS_CODE.slice(JS_CODE.indexOf("function closeNotePanel"));
+  const body = close.slice(0, close.indexOf("\n}\n") + 3);
+  assert.ok(/setNoteExpanded\(false\)/.test(body), "收起时应退出放大态");
+  assert.ok(/setNoteExpanded\(false\)[\s\S]{0,80}?else closeNotePanel\(\)/.test(JS_CODE),
+    "Esc 在放大态应先还原，再按一次才收起");
 });
 
 // ---------- 输出 ----------

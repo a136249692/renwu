@@ -260,6 +260,8 @@ const slideshowClose  = $("slideshow-close");
 const noteFab         = $("image-note-fab");
 const notePanel       = $("image-note-panel");
 const noteCloseBtn    = $("image-note-close");
+const noteExpandBtn   = $("image-note-expand");
+const noteBackdrop    = $("image-note-backdrop");
 const noteEditor      = $("image-note-editor");
 const noteStateEl     = $("image-note-state");
 const noteToolbar     = notePanel ? notePanel.querySelector(".image-note-tools") : null;
@@ -2341,8 +2343,24 @@ function openNotePanel() {
 function closeNotePanel() {
   if (!notePanel || notePanel.hidden) return;
   flushNoteNow();
+  setNoteExpanded(false);   // 收起时一并退出放大态，下次打开回到默认小面板
   notePanel.hidden = true;
   if (noteFab) noteFab.setAttribute("aria-expanded", "false");
+}
+
+/* 放大 / 还原笔记面板：放大后变成居中大窗口（带半透明遮罩），便于通读、长文编辑。
+   遮罩层只负责「点空白还原」，不关闭面板，避免误触丢失正在写的内容。 */
+function setNoteExpanded(on) {
+  if (!notePanel) return;
+  const next = !!on;
+  notePanel.classList.toggle("expanded", next);
+  if (noteBackdrop) noteBackdrop.hidden = !next;
+  if (noteExpandBtn) {
+    noteExpandBtn.textContent = next ? "⤡" : "⤢";
+    noteExpandBtn.title = next ? "还原笔记面板大小" : "放大编辑笔记";
+    noteExpandBtn.setAttribute("aria-label", next ? "还原笔记面板大小" : "放大编辑笔记");
+    noteExpandBtn.setAttribute("aria-pressed", String(next));
+  }
 }
 
 function toggleNotePanel() {
@@ -2355,6 +2373,12 @@ function bindNote() {
   if (!noteFab || !notePanel || !noteEditor) return;
   noteFab.addEventListener("click", toggleNotePanel);
   if (noteCloseBtn) noteCloseBtn.addEventListener("click", closeNotePanel);
+  if (noteExpandBtn) {
+    // mousedown 阻止默认：避免点按钮时编辑器失焦、光标位置丢失
+    noteExpandBtn.addEventListener("mousedown", e => e.preventDefault());
+    noteExpandBtn.addEventListener("click", () => setNoteExpanded(!notePanel.classList.contains("expanded")));
+  }
+  if (noteBackdrop) noteBackdrop.addEventListener("click", () => setNoteExpanded(false));
 
   // 工具栏：mousedown 阻止默认行为，避免编辑器失焦丢失选区
   if (noteToolbar) {
@@ -2384,7 +2408,12 @@ function bindNote() {
   });
 
   noteEditor.addEventListener("keydown", e => {
-    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeNotePanel(); }
+    if (e.key === "Escape") {
+      e.preventDefault(); e.stopPropagation();
+      // 放大态先还原大小，再按一次才收起面板
+      if (notePanel.classList.contains("expanded")) setNoteExpanded(false);
+      else closeNotePanel();
+    }
   });
 
   // 关闭/隐藏窗口前兜底保存

@@ -1276,6 +1276,14 @@ mark {
 .mind-edge-temp { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-dasharray: 6 5; pointer-events: none; }
 
 .mind-nodes { position: absolute; top: 0; left: 0; z-index: 2; }
+/* 思维分组：包住整组的虚线框（纯视觉，不拦截鼠标） */
+.mind-groups { position: absolute; top: 0; left: 0; width: 0; height: 0; }
+.mind-group-box {
+  position: absolute; z-index: 1; pointer-events: none;
+  border: 2px dashed rgba(99, 102, 241, 0.45);
+  border-radius: 16px;
+  background: rgba(99, 102, 241, 0.045);
+}
 .mind-node {
   position: absolute; width: 210px; min-height: 64px; background: #fff;
   border: 2px solid transparent; border-radius: 13px;
@@ -1352,6 +1360,21 @@ mark {
   display: flex; flex-direction: column; gap: 6px;
 }
 .mind-node-imgs[hidden] { display: none; }
+/* 有图片的节点：正文在左、图片在右并排（图片不再落到正文下方）。
+   宽度由 JS 按图片张数/展开状态下发（正文固定 210 + 图片列），上限 560px。
+   注意不能用 width:auto：节点绝对定位在 0 宽度的 .mind-world 里，
+   auto 会按 0 可用宽度收缩，正文会被挤成很窄一条。 */
+.mind-node.has-imgs {
+  max-width: 560px;
+  display: flex; flex-direction: row; align-items: flex-start;
+}
+.mind-node.has-imgs .mind-node-body { flex: 1 1 210px; min-width: 150px; }
+.mind-node.has-imgs .mind-node-imgs {
+  flex: 0 1 auto; max-width: 300px;
+  /* 顶部让出删除按钮（右上角 ×）的位置，避免悬停时盖住缩略图 */
+  padding: 26px 12px 10px 2px; margin-top: 0;
+  justify-content: flex-start;
+}
 /* 折叠态：单张封面缩略图 + 张数角标，点击展开成一行多列画廊 */
 .mind-node-cover {
   position: relative; width: 56px; height: 56px; border-radius: 9px; overflow: hidden;
@@ -1406,14 +1429,8 @@ mark {
   font-size: 11px; padding: 0; cursor: var(--cursor-arrow);
 }
 .mind-node-img-toggle:hover { color: var(--accent); }
-/* 图片区操作条：加图按钮 */
+/* 图片区操作条：仅承载「粘贴」按钮（加图入口在顶部工具栏） */
 .mind-node-img-bar { display: flex; gap: 6px; }
-.mind-node-add-img {
-  border: 1px dashed rgba(15,23,42,0.24); background: rgba(255,255,255,0.6);
-  color: var(--muted); font-size: 11px; padding: 2px 8px; border-radius: 7px;
-  cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
-}
-.mind-node-add-img:hover { border-color: var(--accent); color: var(--accent); }
 /* 图片区操作条：粘贴按钮（剪贴板有内容时才出现） */
 .mind-node-paste-img {
   border: 1px solid rgba(15,23,42,0.18); background: rgba(255,255,255,0.6);
@@ -1690,7 +1707,43 @@ body.alt-pressed .img-card .card-tools { opacity: 1; }
   background: transparent; color: var(--muted); font-size: 13px; line-height: 1;
   cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
 }
+.image-note-expand {
+  width: 24px; height: 24px; border-radius: 7px; border: 1px solid transparent;
+  background: transparent; color: var(--muted); font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  cursor: var(--cursor-arrow); transition: all 0.15s var(--ease);
+}
+.image-note-expand:hover { background: rgba(15,23,42,0.06); color: var(--text); }
+.image-note-expand[aria-pressed="true"] { background: rgba(47,109,246,0.10); color: #2f6df6; }
 .image-note-close:hover { background: rgba(15,23,42,0.06); color: var(--text); }
+
+/* 放大态：笔记面板变成画布中央的大窗口，便于通读/长文编辑。
+   用 absolute（而不是 fixed）：画布祖先带 backdrop-filter，会形成 fixed 的
+   包含块，导致面板被裁在画布内且不以视口居中；absolute 相对画布定位更稳，
+   且随画布一起隐藏，切 tab 不会残留。 */
+.image-note-panel.expanded {
+  position: absolute; left: 50%; top: 50%; right: auto; bottom: auto;
+  transform: translate(-50%, -50%);
+  width: min(880px, calc(100% - 48px));
+  height: min(760px, calc(100% - 96px));
+  max-height: none;
+  z-index: 121;
+  animation: image-note-zoom-in 0.18s var(--ease-out);
+}
+.image-note-panel.expanded .image-note-editor { min-height: 0; font-size: 14.5px; }
+@keyframes image-note-zoom-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.97); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+.image-note-backdrop {
+  position: absolute; inset: 0; z-index: 120;
+  background: rgba(15,23,42,0.18);
+  -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
+}
+.image-note-backdrop[hidden] { display: none; }
+@media (max-width: 720px) {
+  .image-note-panel.expanded { width: calc(100% - 24px); height: calc(100% - 72px); }
+}
 
 .image-note-tools {
   display: flex; align-items: center; gap: 4px; flex-wrap: wrap;

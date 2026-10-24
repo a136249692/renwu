@@ -13,6 +13,8 @@ import assert from "node:assert";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const MIND = fs.readFileSync(path.join(ROOT, "src/mindmap.js"), "utf8");
+const HTML = fs.readFileSync(path.join(ROOT, "src/index.html"), "utf8");
+const CSS = fs.readFileSync(path.join(ROOT, "src/styles.css"), "utf8");
 
 const results = [];
 function test(name, fn) {
@@ -67,6 +69,66 @@ test("锚点节点被移出集合时，selectedNodeId 改指向剩余节点（�
   const body = MIND.substring(start, end === -1 ? MIND.length : end);
   assert.ok(/selectedNodeId === n\.id && !selectedNodeIds\.has\(n\.id\)/.test(body),
     "应在移除后修正 selectedNodeId 锚点");
+});
+
+// ---------- 思维分组（打包成一组，整组选中 / 拖动） ----------
+
+const fnBody = name => {
+  const i = MIND.indexOf(`function ${name}`);
+  if (i < 0) return "";
+  const body = MIND.slice(i);
+  return body.slice(0, body.indexOf("\n}\n") + 3);
+};
+
+test("工具栏提供「📦 分组 / ✂️ 解散分组」按钮", () => {
+  assert.ok(/id="mind-group"/.test(HTML), "缺少 #mind-group 按钮");
+  assert.ok(/id="mind-ungroup"/.test(HTML), "缺少 #mind-ungroup 按钮");
+  assert.ok(/mindGroupBtn\.addEventListener\("click"/.test(MIND), "分组按钮应绑定 createMindGroup");
+  assert.ok(/mindUngroupBtn\.addEventListener\("click"/.test(MIND), "解散按钮应绑定 ungroupMindSelection");
+});
+
+test("分组按钮只在多选 ≥2 个时出现，解散只在选中集合含分组块时出现", () => {
+  const b = fnBody("syncMindToolbarBtns");
+  assert.ok(/selectedNodeIds\.size\s*>=\s*2/.test(b), "分组按钮应按多选数量显隐");
+  assert.ok(/groupOfNode\(id\)/.test(b), "解散按钮应检查选中集合是否属于分组");
+});
+
+test("分组数据按导图持久化到 localStorage", () => {
+  assert.ok(/LS_MIND_GROUPS\s*=\s*"glassCanvas\.mindGroups"/.test(MIND), "应定义分组存储 key");
+  assert.ok(/localStorage\.setItem\(LS_MIND_GROUPS/.test(fnBody("persistMindGroups")), "应落盘");
+  assert.ok(/mindGroups\[activeMapId\]\s*=\s*gs/.test(MIND), "分组应按 activeMapId 分开保存");
+});
+
+test("createMindGroup 要求 ≥2 个且把成员从旧分组移出", () => {
+  const b = fnBody("createMindGroup");
+  assert.ok(/ids\.length\s*<\s*2/.test(b), "少于 2 个应拒绝分组");
+  assert.ok(/gs\[gid\]\.filter\(id => !ids\.includes\(id\)\)/.test(b), "应把成员从旧分组中剔除");
+  assert.ok(/persistMindGroups\(\)/.test(b), "分组后应落盘");
+});
+
+test("点分组内任意一块 → 选中整组（selectNode 与 downOnNode 都走 selectionWithGroup）", () => {
+  const sel = fnBody("selectNode");
+  assert.ok(/selectionWithGroup\(id\)/.test(sel), "selectNode 应扩展为整组");
+  const down = MIND.slice(MIND.indexOf("function downOnNode("), MIND.indexOf("\nfunction placeNodeOnTop("));
+  assert.ok(/selectionWithGroup\(n\.id\)/.test(down), "downOnNode 应按分组扩展拖动集合");
+});
+
+test("分组虚线框随拖动移动，并在节点增删后自动剪掉失效成员", () => {
+  const boxes = fnBody("renderMindGroupBoxes");
+  assert.ok(/live\.length\s*<\s*2/.test(boxes), "成员不足 2 个时清理失效分组");
+  assert.ok(/mindGroups\[activeMapId\] = gs/.test(boxes) && /persistMindGroups\(\)/.test(boxes),
+    "剪掉失效成员后应落盘");
+  const down = MIND.slice(MIND.indexOf("function downOnNode("), MIND.indexOf("\nfunction placeNodeOnTop("));
+  assert.ok(/renderMindGroupBoxes\(\)/.test(down), "拖动过程中应刷新分组框");
+  assert.ok(/renderMindGroupBoxes\(\)/.test(fnBody("renderMindCanvas")), "渲染节点后应刷新分组框");
+});
+
+test("CSS 提供分组虚线框（不拦截鼠标事件）", () => {
+  assert.ok(/\.mind-group-box\s*\{/.test(CSS), "缺少 .mind-group-box 样式");
+  const i = CSS.indexOf(".mind-group-box {");
+  const block = CSS.slice(i, CSS.indexOf("}", i));
+  assert.ok(/pointer-events:\s*none/.test(block), "虚线框不应拦截节点点击");
+  assert.ok(/dashed/.test(block), "应为虚线以区别选中描边");
 });
 
 // 汇总

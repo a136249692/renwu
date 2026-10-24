@@ -104,11 +104,15 @@
             <div class="stage-header" id="mind-header">
               <h2 id="mind-title">思维导图</h2>
               <span class="meta" id="mind-meta"></span>
-              <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · 节点内 <kbd>＋ 图片</kbd> 加图（可多张）· 选中节点后 <kbd>Ctrl/⌘+V</kbd> 粘贴图片 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
+              <span class="hint"><kbd>双击空白</kbd> 新建节点 · Hover 节点端口并拖出作连线 · 选中节点后点工具栏 <kbd>🖼 上传图片</kbd> 加图（可多张）· 选中节点后 <kbd>Ctrl/⌘+V</kbd> 粘贴图片 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 选中节点后 <kbd>Delete</kbd> 删除</span>
             </div>
             <div class="mind-toolbar" id="mind-toolbar" hidden>
               <button id="mind-copy-block"  title="复制选中的思维块（Ctrl+Shift+C，含文本与图片）" hidden>📋 复制思维块</button>
               <button id="mind-paste-block" title="粘贴思维块到画布中心（Ctrl+Shift+V）" hidden>📥 粘贴思维块</button>
+              <button id="mind-add-img" title="给选中的思维块上传图片（可多选）" hidden>🖼 上传图片</button>
+              <span class="tb-sep" aria-hidden="true"></span>
+              <button id="mind-group"   title="把选中的思维块打包成一组（至少 2 个，Ctrl/⌘ 点选）：之后点任意一块整组选中、一起拖动" hidden>📦 分组</button>
+              <button id="mind-ungroup" title="解散选中思维块所在的分组" hidden>✂️ 解散分组</button>
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="mind-font-dec" title="减小节点字号">A−</button>
               <span id="mind-font-label" title="当前节点字号（整个导图统一）">13px</span>
@@ -129,7 +133,7 @@
               <b>双击空白处</b> 即可新建思维节点<br />
               拖节点上任意位置移动 · 单击文字编辑内容<br />
               悬停节点显示连接点，从连接点拖到另一节点即可连线<br />
-              节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br />
+              选中节点后点工具栏「🖼 上传图片」可为该内容块加图（可多张，点击展开、再点放大）<br />
               选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块
             </div>
           </div>
@@ -193,6 +197,8 @@
               <div class="image-note-head">
                 <span class="image-note-title">📝 图片夹笔记</span>
                 <span class="image-note-state" id="image-note-state">自动保存</span>
+                <button class="image-note-expand" id="image-note-expand" type="button"
+                        title="放大编辑笔记" aria-label="放大编辑笔记" aria-pressed="false">⤢</button>
                 <button class="image-note-close" id="image-note-close" type="button" title="收起笔记">✕</button>
               </div>
               <div class="image-note-tools" role="toolbar" aria-label="笔记格式工具">
@@ -208,6 +214,7 @@
               <div class="image-note-editor" id="image-note-editor" contenteditable="true"
                    spellcheck="false" data-placeholder="记录当前图片夹的要点…"></div>
             </section>
+            <div class="image-note-backdrop" id="image-note-backdrop" hidden></div>
           </div>
         </div>
       </main>

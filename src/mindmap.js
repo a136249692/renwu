@@ -36,6 +36,7 @@ const LS_NODES = "glassCanvas.mindNodes";
 const LS_EDGES = "glassCanvas.mindEdges";
 const LS_NODE_IMGS = "glassCanvas.mindNodeImgs";   // 思维节点图片元数据（浏览器兜底）
 const LS_MAP_ORDER = "glassCanvas.mindOrder";   // { mapId: 0..n-1 } 手动排序
+const LS_MIND_GROUPS = "glassCanvas.mindGroups"; // 思维分组 { [mapId]: { [gid]: [nodeId, ...] } }
 function lsLoadOrder() {
   try { return JSON.parse(localStorage.getItem(LS_MAP_ORDER) || "{}"); } catch { return {}; }
 }
@@ -48,6 +49,18 @@ let lsMaps = lsLoadOf(LS_MAPS);
 let lsNodesArr = lsLoadOf(LS_NODES);
 let lsEdgesArr = lsLoadOf(LS_EDGES);
 let lsNodeImgs = lsLoadOf(LS_NODE_IMGS);
+/* 思维分组：{ [mapId]: { [gid]: [nodeId, ...] } }。
+   和图片分组一样落在 localStorage（桌面端 WebView 同样持久化）。 */
+function lsLoadMindGroups() {
+  try {
+    const m = JSON.parse(localStorage.getItem(LS_MIND_GROUPS) || "{}");
+    return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+  } catch { return {}; }
+}
+let mindGroups = lsLoadMindGroups();
+function persistMindGroups() {
+  try { localStorage.setItem(LS_MIND_GROUPS, JSON.stringify(mindGroups)); } catch {}
+}
 let _lsIdSeq = 0;
 
 /* toast 反馈：复用与 main.js / image-wall.js 同一套 DOM 节点（#app-toast） */
@@ -116,6 +129,10 @@ const mindCanvas = $("mind-canvas");
 const mindWorld = $("mind-world");
 const mindEdgesSvg = $("mind-edges");
 const mindNodesWrap = $("mind-nodes");
+// 分组虚线框单独一层：放在节点下方（节点有 z-index:2/3），不拦截鼠标事件
+const mindGroupLayer = document.createElement("div");
+mindGroupLayer.className = "mind-groups";
+const mindGroupBoxEls = new Map();   // gid -> box el
 const mindEmpty = $("mind-empty");
 const mindImageInput = $("mind-image-input");
 const mindLightbox = $("mind-lightbox");
@@ -858,14 +875,16 @@ function renderMindCanvas() {
   // 节点
   nodeEls.clear();
   mindNodesWrap.innerHTML = "";
+  mindNodesWrap.appendChild(mindGroupLayer);   // 分组虚线框层（节点之下）
   for (const n of nodes) {
     const el = makeNodeEl(n);
     mindNodesWrap.appendChild(el);
   }
   renderEdges();
+  renderMindGroupBoxes();
   // 空状态提示
   if (nodes.length === 0) {
-    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>节点内点「＋ 图片」可为该内容块加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
+    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>按住 <kbd>Ctrl/⌘</kbd> 点选多个思维块后，点工具栏「📦 分组」可打包成一组：之后点组内任一块整组选中、一起拖动，虚线框标出分组范围<br/>节点内不再常驻「＋ 图片」按钮，选中节点后点工具栏「🖼 上传图片」即可加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
     mindEmpty.hidden = false;
   } else {
     mindEmpty.hidden = true;
@@ -903,25 +922,35 @@ function forbidImageDownload(imgEl) {
 }
 /* 折叠态：一张封面缩略图 + 张数角标（点击展开）。
    展开态：一行多列横向画廊（点击单张进灯箱缩放查看）。
-   无图时只显示「＋ 图片」按钮，让用户随时为该内容块补充图片。 */
+   加图入口已移到顶部工具栏（选中思维块后才出现），内容块里不再常驻「＋ 图片」按钮。 */
 function renderNodeImages(n, el) {
   if (!el) return;
   const wrap = el.querySelector(".mind-node-imgs");
   if (!wrap) return;
   wrap.innerHTML = "";
   const list = nodeImages.get(n.id) || [];
+  const expanded = expandedImgs.has(n.id);
+  // 有图片时节点切换为「正文在左、图片在右」的横向布局：
+  // 正文固定 210，图片列按状态留宽（折叠=封面 + 展开按钮，展开=按张数，最多 5 张宽度，其余横向滚动）
+  el.classList.toggle("has-imgs", list.length > 0);
+  if (!list.length) {
+    el.style.width = "";
+  } else if (expanded) {
+    const thumbsW = Math.min(list.length, 5) * 62 - 6;
+    el.style.width = Math.min(560, 210 + 26 + Math.max(64, thumbsW)) + "px";
+  } else {
+    el.style.width = "322px";
+  }
   wrap.hidden = false;
 
   if (list.length === 0) {
-    const bar = document.createElement("div");
-    bar.className = "mind-node-img-bar";
-    bar.appendChild(makeAddImgBtn(n.id, "🖼 ＋ 图片"));
-    appendPasteBtn(bar, n.id);
-    wrap.appendChild(bar);
+    appendNodeImgBar(wrap, n.id);
+    // 没有图片、也没有可粘贴内容时整块收起，避免内容块里留一条空栏
+    wrap.hidden = !wrap.childElementCount;
+    renderMindGroupBoxes();
     return;
   }
 
-  const expanded = expandedImgs.has(n.id);
   if (!expanded) {
     // 折叠：封面缩略图 + 计数
     const cover = document.createElement("div");
@@ -945,11 +974,8 @@ function renderNodeImages(n, el) {
     toggle.textContent = `展开 ${list.length} 张 ▸`;
     toggle.addEventListener("click", doExpand);
     wrap.appendChild(toggle);
-    const bar = document.createElement("div");
-    bar.className = "mind-node-img-bar";
-    bar.appendChild(makeAddImgBtn(n.id, "＋ 图片"));
-    appendPasteBtn(bar, n.id);
-    wrap.appendChild(bar);
+    appendNodeImgBar(wrap, n.id);
+    renderMindGroupBoxes();
     return;
   }
 
@@ -997,19 +1023,16 @@ function renderNodeImages(n, el) {
   toggle.textContent = "收起 ▾";
   toggle.addEventListener("click", e => { e.stopPropagation(); expandedImgs.delete(n.id); renderNodeImages(n, el); renderEdges(); });
   wrap.appendChild(toggle);
+  appendNodeImgBar(wrap, n.id);
+  renderMindGroupBoxes();   // 加图/展开会改变节点宽度，分组框跟着调整
+}
+/* 图片条只承载「粘贴到本块」按钮：加图入口在顶部工具栏，选中节点后出现。
+   没有可粘贴内容时不渲染，避免内容块里多出一条空白栏。 */
+function appendNodeImgBar(wrap, nodeId) {
   const bar = document.createElement("div");
   bar.className = "mind-node-img-bar";
-  bar.appendChild(makeAddImgBtn(n.id, "＋ 图片"));
-  appendPasteBtn(bar, n.id);
-  wrap.appendChild(bar);
-}
-function makeAddImgBtn(nodeId, label) {
-  const add = document.createElement("button");
-  add.className = "mind-node-add-img";
-  add.textContent = label;
-  add.title = "给这个思维块添加图片（可多选）";
-  add.addEventListener("click", e => { e.stopPropagation(); pickImagesForNode(nodeId); });
-  return add;
+  appendPasteBtn(bar, nodeId);
+  if (bar.childElementCount) wrap.appendChild(bar);
 }
 async function applyThumbSrc(imgEl, im) {
   const u = await nodeImageUrl(im);
@@ -1431,10 +1454,118 @@ function bindLightbox() {
 /* ---------- 选择 / 编辑 ---------- */
 function selectNode(id) {
   selectedNodeId = id;
-  selectedNodeIds = new Set(id != null ? [id] : []);
+  // 点在分组内的任意一块 → 整组一起选中（后续拖动即整组移动）
+  selectedNodeIds = id != null ? selectionWithGroup(id) : new Set();
   selectedEdgeId = null;
   applyNodeSelectionClasses();
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
+}
+/* ---------- 思维分组（打包多个思维块，整组选中 / 整组拖动） ----------
+ * 行为：
+ *   · 单选或 Ctrl/⌘ 多选 ≥2 个 → 点工具栏「📦 分组」打包成一组；
+ *   · 之后点组内任意一块，自动选中整组，拖动任意一块 = 整组一起移动；
+ *   · 画布上用一圈虚线框标出分组范围；「✂️ 解散分组」拆开。
+ * 数据按导图分开存 localStorage，删除节点/切换导图时自动剪掉失效成员。 */
+function mapGroups() {
+  if (activeMapId == null) return {};
+  const m = mindGroups[activeMapId];
+  return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+}
+function groupOfNode(nodeId) {
+  const gs = mapGroups();
+  for (const [gid, ids] of Object.entries(gs)) {
+    if (Array.isArray(ids) && ids.includes(nodeId)) return gid;
+  }
+  return null;
+}
+/* 分组里的有效成员（过滤掉已删除的节点） */
+function groupNodeIds(gid) {
+  const ids = mapGroups()[gid];
+  if (!Array.isArray(ids)) return [];
+  return ids.filter(id => nodes.some(n => n.id === id));
+}
+/* 选中某个节点时，如果它属于分组，选中集合扩展为整组（至少 2 个才扩展） */
+function selectionWithGroup(nodeId) {
+  const gid = groupOfNode(nodeId);
+  const members = gid ? groupNodeIds(gid) : [];
+  return new Set(members.length >= 2 ? members : [nodeId]);
+}
+function renderMindGroupBoxes() {
+  if (!mindGroupLayer) return;
+  const gs = mapGroups();
+  const keep = new Set();
+  let changed = false;
+  for (const [gid, ids] of Object.entries(gs)) {
+    if (!Array.isArray(ids)) { delete gs[gid]; changed = true; continue; }
+    const live = ids.filter(id => nodes.some(n => n.id === id));
+    if (live.length !== ids.length) { gs[gid] = live; changed = true; }
+    // 少于 2 个（成员被删）视为失效分组，直接清理
+    if (live.length < 2) { delete gs[gid]; changed = true; continue; }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of live) {
+      const n = nodes.find(x => x.id === id);
+      const el = nodeEls.get(id);
+      const h = el ? el.offsetHeight : 70;
+      minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + nodeWidth(n)); maxY = Math.max(maxY, n.y + h);
+    }
+    let box = mindGroupBoxEls.get(gid);
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "mind-group-box";
+      mindGroupLayer.appendChild(box);
+      mindGroupBoxEls.set(gid, box);
+    }
+    box.style.left = (minX - 10) + "px";
+    box.style.top = (minY - 12) + "px";
+    box.style.width = (maxX - minX + 20) + "px";
+    box.style.height = (maxY - minY + 24) + "px";
+    keep.add(gid);
+  }
+  for (const [gid, box] of mindGroupBoxEls) {
+    if (!keep.has(gid)) { box.remove(); mindGroupBoxEls.delete(gid); }
+  }
+  if (changed && activeMapId != null) {
+    mindGroups[activeMapId] = gs;
+    persistMindGroups();
+  }
+}
+function createMindGroup() {
+  if (!activeMap) { toast("请先选择思维导图", 2600); return; }
+  const ids = [...selectedNodeIds];
+  if (ids.length < 2) { toast("请按住 Ctrl/⌘ 选中 2 个以上思维块再分组", 3000); return; }
+  const gs = mapGroups();
+  // 已属于其它分组的节点先移出（一个块只属于一个分组）
+  for (const gid of Object.keys(gs)) {
+    const kept = gs[gid].filter(id => !ids.includes(id));
+    if (kept.length !== gs[gid].length) { gs[gid] = kept; }
+    if (gs[gid].length < 2) delete gs[gid];
+  }
+  const gid = "mg-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
+  gs[gid] = ids.slice();
+  mindGroups[activeMapId] = gs;
+  persistMindGroups();
+  renderMindGroupBoxes();
+  if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
+  toast(`已把 ${ids.length} 个思维块打包成一组：点其中任意一块可整组选中并一起拖动`, 3800);
+}
+function ungroupMindSelection() {
+  if (!activeMap) return;
+  const gs = mapGroups();
+  let removed = 0;
+  for (const gid of Object.keys(gs)) {
+    const before = Array.isArray(gs[gid]) ? gs[gid].length : 0;
+    const kept = (gs[gid] || []).filter(id => !selectedNodeIds.has(id));
+    removed += before - kept.length;
+    if (kept.length) gs[gid] = kept; else delete gs[gid];
+    if (gs[gid] && gs[gid].length < 2) delete gs[gid];
+  }
+  if (!removed) { toast("选中的思维块不在任何分组里", 2600); return; }
+  mindGroups[activeMapId] = gs;
+  persistMindGroups();
+  renderMindGroupBoxes();
+  if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
+  toast("已解散分组", 2000);
 }
 /* 把「.selected」class 刷到所有节点上，与 selectedNodeIds 集合保持同步。 */
 function applyNodeSelectionClasses() {
@@ -1601,11 +1732,12 @@ function downOnNode(e, el, n) {
   const wasSelectedBefore = selectedNodeIds.has(n.id);
   selectedNodeId = n.id;
   selectedEdgeId = null;
-  // 无 Ctrl 且按下的节点不在当前选中集合里 → 重置为单点
+  // 分组语义：按在组内任意一块上，等于按在整组上
+  const groupSel = selectionWithGroup(n.id);
   if (!isCtrl && !wasSelectedBefore) {
-    selectedNodeIds = new Set([n.id]);
+    selectedNodeIds = groupSel;
   } else if (!selectedNodeIds.has(n.id)) {
-    selectedNodeIds.add(n.id);
+    for (const id of groupSel) selectedNodeIds.add(id);
   }
   applyNodeSelectionClasses();
 
@@ -1639,6 +1771,7 @@ function downOnNode(e, el, n) {
     }
     placeNodeOnTop(el, n);
     renderEdges();
+    renderMindGroupBoxes();   // 分组框随成员一起走
   };
   const onUp = async () => {
     window.removeEventListener("pointermove", onMove);
@@ -1720,10 +1853,16 @@ function updateTempEdge(cx, cy) {
   const p0 = nodeCenter(connectingPort.node);
   tempEdgeEl.setAttribute("d", edgeCurvePath(p0.x, p0.y, w1.x, w1.y));
 }
+/* 节点宽度：无图片时固定 NODE_W；有图片时节点被内容横向撑开，
+   连线端点、命中测试、fitView 都要按实测宽度算，否则连线会挂在旧的右边界上。 */
+function nodeWidth(n) {
+  const el = nodeEls.get(n.id);
+  return el && el.offsetWidth ? el.offsetWidth : NODE_W;
+}
 function nodeCenter(n) {
   const el = nodeEls.get(n.id);
   const h = el ? el.offsetHeight : 70;
-  return { x: n.x + NODE_W / 2, y: n.y + h / 2 };
+  return { x: n.x + nodeWidth(n) / 2, y: n.y + h / 2 };
 }
 function edgeCurvePath(ax, ay, bx, by) {
   const cdx = Math.max(36, Math.abs(bx - ax) / 2);
@@ -1733,7 +1872,7 @@ function edgePointOn(n, o) {
   const c1 = nodeCenter(n), c2 = nodeCenter(o);
   const el = nodeEls.get(n.id);
   const h = el ? el.offsetHeight : 70;
-  const w = NODE_W;
+  const w = nodeWidth(n);
   const dx = c2.x - c1.x, dy = c2.y - c1.y;
   if (Math.abs(dx) >= Math.abs(dy)) {
     return dx >= 0 ? { x: n.x + w, y: c1.y } : { x: n.x, y: c1.y };
@@ -1746,13 +1885,14 @@ function edgePath(a, b) {
   return `M${p1.x},${p1.y} C ${p1.x + cdx},${p1.y} ${p2.x - cdx},${p2.y} ${p2.x},${p2.y}`;
 }
 function hitTestNode(cx, cy) {
-  const w = toWorld(cx, cy);
+  const pt = toWorld(cx, cy);
   let nearest = null, best = Infinity;
   for (const n of nodes) {
     const el = nodeEls.get(n.id);
     const h = el ? el.offsetHeight : 70;
-    if (w.x >= n.x - 6 && w.x <= n.x + NODE_W + 6 && w.y >= n.y - 6 && w.y <= n.y + h + 6) {
-      const d2 = (w.x - (n.x + NODE_W / 2)) ** 2 + (w.y - (n.y + h / 2)) ** 2;
+    const w = nodeWidth(n);
+    if (pt.x >= n.x - 6 && pt.x <= n.x + w + 6 && pt.y >= n.y - 6 && pt.y <= n.y + h + 6) {
+      const d2 = (pt.x - (n.x + w / 2)) ** 2 + (pt.y - (n.y + h / 2)) ** 2;
       if (d2 < best) { best = d2; nearest = n; }
     }
   }
@@ -1851,7 +1991,7 @@ function fitView() {
     const el = nodeEls.get(n.id);
     const h = el ? el.offsetHeight : 70;
     minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
-    maxX = Math.max(maxX, n.x + NODE_W); maxY = Math.max(maxY, n.y + h);
+    maxX = Math.max(maxX, n.x + nodeWidth(n)); maxY = Math.max(maxY, n.y + h);
   }
   const margin = 60;
   const zx = (r.width - margin * 2) / (maxX - minX || 1);
@@ -1934,6 +2074,9 @@ function deselectAll() {
 /* ---------- 工具栏 / 键盘 ---------- */
 const mindCopyBlockBtn = $("mind-copy-block");
 const mindPasteBlockBtn = $("mind-paste-block");
+const mindAddImgBtn = $("mind-add-img");
+const mindGroupBtn = $("mind-group");
+const mindUngroupBtn = $("mind-ungroup");
 function syncMindToolbarBtns() {
   if (mindCopyBlockBtn) {
     const show = !!(activeMap && selectedNodeId != null);
@@ -1942,6 +2085,19 @@ function syncMindToolbarBtns() {
   if (mindPasteBlockBtn) {
     const ok = !!(activeMap && _mindClip && _mindClip.type === "mindBlock");
     mindPasteBlockBtn.hidden = !ok;
+  }
+  if (mindAddImgBtn) {
+    // 上传入口只在选中某个思维块时出现，避免常驻在内容块里遮挡文字
+    mindAddImgBtn.hidden = !(activeMap && selectedNodeId != null);
+  }
+  if (mindGroupBtn) {
+    // Ctrl/⌘ 多选 2 个以上思维块后才能打包
+    mindGroupBtn.hidden = !(activeMap && selectedNodeIds.size >= 2);
+  }
+  if (mindUngroupBtn) {
+    // 只要选中集合里有属于分组的块，就允许解散
+    const anyGrouped = !!(activeMap && [...selectedNodeIds].some(id => groupOfNode(id)));
+    mindUngroupBtn.hidden = !anyGrouped;
   }
 }
 function bindToolbar() {
@@ -1959,6 +2115,12 @@ function bindToolbar() {
     copyMindBlock(selectedNodeId);
   });
   if (mindPasteBlockBtn) mindPasteBlockBtn.addEventListener("click", () => pasteMindBlock());
+  if (mindAddImgBtn) mindAddImgBtn.addEventListener("click", () => {
+    if (selectedNodeId == null) { toast("请先选中一个思维块再上传图片", 2600); return; }
+    pickImagesForNode(selectedNodeId);
+  });
+  if (mindGroupBtn) mindGroupBtn.addEventListener("click", () => createMindGroup());
+  if (mindUngroupBtn) mindUngroupBtn.addEventListener("click", () => ungroupMindSelection());
 }
 /* 确认弹窗：确定/取消按钮 + 点击遮罩关闭 + Enter/Escape 快捷键。
    事件在 init 里注册一次，全局复用；askConfirm 每次只显示/隐藏。 */
