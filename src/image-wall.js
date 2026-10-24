@@ -88,6 +88,76 @@ function getGroupMembers(groupId) {
   if (!m) return [];
   return m.filter(id => items.some(it => it.id === id));
 }
+// 大组/幻灯片需要按组拿「图片对象」而不是 id
+function getGroupItemObjects(groupId) {
+  return getGroupMembers(groupId)
+    .map(id => items.find(it => it.id === id))
+    .filter(Boolean);
+}
+
+/* ---------- 大组（Big Group / 分组集合容器） ----------
+ * 一个 bigGroup = 画布上的可视容器框，按图片夹分开存储：
+ *   { id, name, x, y, w, h, groupIds: [普通分组 id, ...] }
+ * 把「已分组的图片」整组拖进框内后：
+ *   1) 记录 groupIds；
+ *   2) 组内图片按网格重新排布到框内；
+ *   3) 双击框内的组（或其图片）以幻灯片方式放映该组图片。
+ * 删除大组只删除容器，不会删除图片。 */
+const BIG_GROUPS_KEY = "glassCanvas.imageBigGroups";
+const BG_HEAD_H = 42;
+const BG_PAD = 14;
+const BG_SUB_LABEL_H = 26;
+const BG_SUB_PAD = 10;
+const BG_ITEM_GAP = 8;
+const BG_CAPTION_H = 34; // 卡片描述栏的近似高度，仅用于布局占位
+let bigGroupsMap = lsLoadBigGroupsMap();
+let bigGroups = [];
+const bigGroupEls = new Map();
+
+function lsLoadBigGroupsMap() {
+  try {
+    const m = JSON.parse(localStorage.getItem(BIG_GROUPS_KEY) || "{}");
+    return m && typeof m === "object" && !Array.isArray(m) ? m : {};
+  } catch { return {}; }
+}
+function persistBigGroups() {
+  if (activeFolderId == null) return;
+  bigGroupsMap[String(activeFolderId)] = bigGroups;
+  try { localStorage.setItem(BIG_GROUPS_KEY, JSON.stringify(bigGroupsMap)); } catch {}
+}
+function loadBigGroupsForFolder(folderId) {
+  const list = folderId == null ? [] : bigGroupsMap[String(folderId)];
+  bigGroups = Array.isArray(list) ? list : [];
+  pruneBigGroups(false);
+}
+// 清理已解散/已删空的组，避免大组里留下幽灵条目
+function pruneBigGroups(persist = true) {
+  let changed = false;
+  for (const bg of bigGroups) {
+    const before = Array.isArray(bg.groupIds) ? bg.groupIds : [];
+    const kept = before.filter(gid => getGroupMembers(gid).length > 0);
+    if (kept.length !== before.length) { bg.groupIds = kept; changed = true; }
+  }
+  if (changed && persist) persistBigGroups();
+  return changed;
+}
+function bigGroupForGroup(gid) {
+  if (!gid) return null;
+  return bigGroups.find(bg => (bg.groupIds || []).includes(gid)) || null;
+}
+function bigGroupItems(bg) {
+  const out = [];
+  const seen = new Set();
+  for (const gid of bg.groupIds || []) {
+    for (const it of getGroupItemObjects(gid)) {
+      if (seen.has(it.id)) continue;
+      seen.add(it.id);
+      out.push(it);
+    }
+  }
+  return out;
+}
+
 
 /* ---------- 工具 ---------- */
 function esc(s) {
@@ -176,6 +246,22 @@ const imageCopyBtn    = $("image-copy");
 const imageCopyOnlyBtn= $("image-copy-only");
 const imageCutBtn     = $("image-cut");
 const imagePasteBtn   = $("image-paste");
+const imageBigGroupBtn= $("image-biggroup");
+const slideshowEl     = $("image-slideshow");
+const slideshowBackdrop = $("slideshow-backdrop");
+const slideshowTitle  = $("slideshow-title");
+const slideshowCounter= $("slideshow-counter");
+const slideshowImg    = $("slideshow-img");
+const slideshowCaption= $("slideshow-caption");
+const slideshowPrev   = $("slideshow-prev");
+const slideshowNext   = $("slideshow-next");
+const slideshowClose  = $("slideshow-close");
+const noteFab         = $("image-note-fab");
+const notePanel       = $("image-note-panel");
+const noteCloseBtn    = $("image-note-close");
+const noteEditor      = $("image-note-editor");
+const noteStateEl     = $("image-note-state");
+const noteToolbar     = notePanel ? notePanel.querySelector(".image-note-tools") : null;
 
 /* ---------- 状态 ---------- */
 let folders = [];
@@ -190,6 +276,11 @@ let drag = null;          // 拖拽/平移会话
 let _viewTimer = null;
 let _itemSaveTimers = new Map(); // itemId -> 保存防抖定时器
 let _renaming = false;
+
+/* 图片夹笔记：按夹保存在 localStorage（键为 folderId 的字符串形式） */
+const NOTE_KEY = "glassCanvas.imageNotes";
+let _noteFolderId = null;   // 当前编辑器内容归属的图片夹
+let _noteTimer = null;      // 自动保存防抖
 
 /* ---------- 应用内确认弹窗（复用 mindmap.js 的 confirm-modal） ---------- */
 let _confirmResolve = null;
@@ -403,6 +494,7 @@ function renderItems() {
   }
   updateEmpty();
   updateHeader();
+  renderBigGroups();
 }
 function createCardEl(it) {
   const el = document.createElement("div");
@@ -470,7 +562,9 @@ function bindCardEvents(el, it) {
   el.addEventListener("dblclick", e => {
     if (e.target.closest(".card-caption")) { startRenameCaption(e, it, el); return; }
     if (e.target.closest(".card-img-wrap") || e.target.closest("img")) {
-      // 双击图片本身：放大预览？这里保持简单，仅编辑标题
+      // 大组内的图片：双击直接按组放映；普通图片仍保留双击改标题
+      const gid = groupForItem(it.id);
+      if (gid && bigGroupForGroup(gid)) { openSlideshow(gid); return; }
       startRenameCaption(e, it, el);
     }
   });
@@ -594,10 +688,362 @@ function ungroupSelected() {
   if (!gid) { toast("请先选中一个组的成员", 2500); return; }
   delete groups[gid];
   persistGroups();
+  pruneBigGroups();
   renderItems();
   syncImageToolbarBtns();
   toast("已解散分组");
 }
+
+/* ---------- 大组：渲染 / 布局 / 拖拽 ---------- */
+function createBigGroup() {
+  if (activeFolderId == null) { toast("请先新建或选择一个图片夹", 2600); return; }
+  const r = imageCanvas.getBoundingClientRect();
+  const cx = (r.width / 2 - view.x) / view.zoom;
+  const cy = (r.height / 2 - view.y) / view.zoom;
+  const w = Math.min(560, Math.max(340, r.width / view.zoom - 80));
+  const bg = {
+    id: "bg-" + uid(),
+    name: `大组 ${bigGroups.length + 1}`,
+    x: Math.round(cx - w / 2),
+    y: Math.round(cy - 150),
+    w,
+    h: 300,
+    // autoH：高度由内容自动撑开/回缩；用户手动拖过右下角后置 false，尊重手动尺寸
+    autoH: true,
+    groupIds: [],
+  };
+  bigGroups.push(bg);
+  persistBigGroups();
+  renderBigGroups();
+  toast("已创建大组：把已分组的图片整组拖进框内，双击组即可放映", 4200);
+}
+
+// 把组内图片按网格排进大组；返回容器所需高度
+function layoutBigGroup(bg, opts = {}) {
+  const save = opts.save !== false;
+  const subW = Math.max(220, bg.w - BG_PAD * 2);
+  const innerW = Math.max(120, subW - BG_SUB_PAD * 2);
+  let cursorY = bg.y + BG_HEAD_H + BG_PAD;
+  for (const gid of bg.groupIds || []) {
+    const members = getGroupItemObjects(gid);
+    if (!members.length) continue;
+    const contentTop = cursorY + BG_SUB_LABEL_H + BG_SUB_PAD;
+    let cx = bg.x + BG_PAD + BG_SUB_PAD;
+    let rowTop = 0;
+    let rowH = 0;
+    for (const it of members) {
+      const w = Math.max(80, it.width || CARD_DEFAULT_W);
+      const h = Math.max(60, it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
+      if (cx > bg.x + BG_PAD + BG_SUB_PAD && cx + w > bg.x + BG_PAD + BG_SUB_PAD + innerW) {
+        cx = bg.x + BG_PAD + BG_SUB_PAD;
+        rowTop += rowH + BG_ITEM_GAP;
+        rowH = 0;
+      }
+      it.x = cx;
+      it.y = contentTop + rowTop;
+      const el = itemEls.get(it.id);
+      if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+      cx += w + BG_ITEM_GAP;
+      rowH = Math.max(rowH, h);
+      if (save) debouncedSaveItem(it.id);
+    }
+    const contentH = rowH > 0 ? rowTop + rowH : 0;
+    cursorY = contentTop + contentH + BG_SUB_PAD + BG_PAD;
+  }
+  const needed = Math.round(cursorY - bg.y);
+  // 自动高度：随组数量撑开/回缩（至少保留默认 300，避免空容器缩成一条）；
+  // 手动拖过右下角后 autoH=false，只保证「够装」，不主动缩小用户设定的高度。
+  if (bg.autoH === false) bg.h = Math.max(Math.round(bg.h || 0), needed);
+  else bg.h = Math.max(300, needed);
+  if (opts.persist !== false) persistBigGroups();
+}
+
+function renderBigGroups() {
+  if (!imageWorld) return;
+  pruneBigGroups();
+  const seen = new Set();
+  for (const bg of bigGroups) {
+    seen.add(bg.id);
+    let el = bigGroupEls.get(bg.id);
+    if (!el) {
+      el = createBigGroupEl(bg);
+      bigGroupEls.set(bg.id, el);
+      imageWorld.appendChild(el);
+    }
+    el.style.left = bg.x + "px";
+    el.style.top = bg.y + "px";
+    el.style.width = bg.w + "px";
+    el.style.height = bg.h + "px";
+    renderBigGroupSubs(bg, el);
+  }
+  for (const [id, el] of bigGroupEls) {
+    if (!seen.has(id)) { el.remove(); bigGroupEls.delete(id); }
+  }
+}
+
+function renderBigGroupSubs(bg, el) {
+  const body = el.querySelector(".big-group-body");
+  const nameEl = el.querySelector(".big-group-name");
+  const metaEl = el.querySelector(".big-group-meta");
+  if (!body) return;
+  if (nameEl) nameEl.textContent = bg.name || "大组";
+  let total = 0;
+  const parts = [];
+  (bg.groupIds || []).forEach((gid, idx) => {
+    const members = getGroupItemObjects(gid);
+    if (!members.length) return;
+    total += members.length;
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const it of members) {
+      const w = it.width || CARD_DEFAULT_W;
+      const h = (it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
+      minX = Math.min(minX, it.x);
+      minY = Math.min(minY, it.y);
+      maxX = Math.max(maxX, it.x + w);
+      maxY = Math.max(maxY, it.y + h);
+    }
+    const left = minX - bg.x - BG_SUB_PAD;
+    const top = minY - bg.y - BG_SUB_LABEL_H - Math.round(BG_SUB_PAD / 2);
+    const width = (maxX - minX) + BG_SUB_PAD * 2;
+    const height = (maxY - minY) + BG_SUB_LABEL_H + Math.round(BG_SUB_PAD * 1.5);
+    parts.push(`
+      <div class="big-group-sub" data-gid="${esc(gid)}"
+           style="left:${left}px;top:${top}px;width:${width}px;height:${height}px">
+        <span class="big-group-sub-label">组 ${idx + 1} · ${members.length} 张
+          <button class="big-group-play" type="button" title="放映这个组">▶ 放映</button>
+        </span>
+      </div>`);
+  });
+  body.innerHTML = parts.join("");
+  if (metaEl) metaEl.textContent = `${(bg.groupIds || []).length} 组 · ${total} 张`;
+}
+
+function createBigGroupEl(bg) {
+  const el = document.createElement("div");
+  el.className = "big-group";
+  el.dataset.bgid = bg.id;
+  el.innerHTML = `
+    <div class="big-group-head">
+      <span class="big-group-name">${esc(bg.name || "大组")}</span>
+      <span class="big-group-meta"></span>
+      <button class="big-group-del" type="button" title="删除大组（只删容器，图片保留）">×</button>
+    </div>
+    <div class="big-group-body"></div>
+    <span class="big-group-resize" title="拖动调整大组大小"></span>
+  `;
+  bindBigGroupEvents(el, bg);
+  return el;
+}
+
+function bindBigGroupEvents(el, bg) {
+  const head = el.querySelector(".big-group-head");
+  const body = el.querySelector(".big-group-body");
+  const resize = el.querySelector(".big-group-resize");
+  const del = el.querySelector(".big-group-del");
+
+  // 拖动标题栏：容器与组内图片整体平移
+  head.addEventListener("mousedown", e => {
+    if (e.target.closest(".big-group-del")) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY;
+    const bx = bg.x, by = bg.y;
+    const starts = bigGroupItems(bg).map(it => ({ it, x: it.x, y: it.y, el: itemEls.get(it.id) }));
+    const move = ev => {
+      const dx = (ev.clientX - sx) / view.zoom;
+      const dy = (ev.clientY - sy) / view.zoom;
+      bg.x = bx + dx;
+      bg.y = by + dy;
+      el.style.left = bg.x + "px";
+      el.style.top = bg.y + "px";
+      for (const s of starts) {
+        s.it.x = s.x + dx;
+        s.it.y = s.y + dy;
+        if (s.el) { s.el.style.left = s.it.x + "px"; s.el.style.top = s.it.y + "px"; }
+      }
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      persistBigGroups();
+      for (const s of starts) debouncedSaveItem(s.it.id);
+      renderBigGroups();
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+
+  // 右下角缩放容器：宽度变化后重排组内图片
+  resize.addEventListener("mousedown", e => {
+    e.preventDefault();
+    e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY;
+    const w0 = bg.w, h0 = bg.h;
+    const move = ev => {
+      bg.w = Math.max(300, w0 + (ev.clientX - sx) / view.zoom);
+      bg.h = Math.max(160, h0 + (ev.clientY - sy) / view.zoom);
+      el.style.width = bg.w + "px";
+      el.style.height = bg.h + "px";
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      bg.w = Math.round(bg.w);
+      // 用户手动定过尺寸后，不再让内容自动回缩高度
+      bg.autoH = false;
+      layoutBigGroup(bg);
+      persistBigGroups();
+      renderBigGroups();
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+
+  del.addEventListener("mousedown", e => e.stopPropagation());
+  del.addEventListener("click", e => {
+    e.stopPropagation();
+    const idx = bigGroups.findIndex(x => x.id === bg.id);
+    if (idx >= 0) bigGroups.splice(idx, 1);
+    persistBigGroups();
+    renderBigGroups();
+    toast("已删除大组（图片保留）", 2600);
+  });
+
+  // 双击组区域 → 按组放映；也可点标签上的 ▶ 放映
+  body.addEventListener("dblclick", e => {
+    const sub = e.target.closest(".big-group-sub");
+    if (!sub) return;
+    e.stopPropagation();
+    openSlideshow(sub.dataset.gid);
+  });
+  body.addEventListener("click", e => {
+    const play = e.target.closest(".big-group-play");
+    if (!play) return;
+    e.stopPropagation();
+    const sub = play.closest(".big-group-sub");
+    if (sub) openSlideshow(sub.dataset.gid);
+  });
+}
+
+// 把一个或多个普通分组放入大组
+function addGroupsToBigGroup(bg, gids) {
+  const existing = new Set(bg.groupIds || []);
+  const toAdd = Array.from(gids).filter(gid => gid && !existing.has(gid));
+  // 已经在当前大组里（用户在容器内挪动了图片）：按容器规则重排一次，
+  // 否则组区域虚线框会停在旧位置、和图片对不上；这种情况不需要提示。
+  if (!toAdd.length) {
+    layoutBigGroup(bg);
+    renderBigGroups();
+    return;
+  }
+  // 一个组只归属一个大组：从其他大组里移除，避免同一批图片被两个容器争抢布局
+  const touched = [];
+  for (const other of bigGroups) {
+    if (other === bg || !Array.isArray(other.groupIds)) continue;
+    const kept = other.groupIds.filter(gid => !toAdd.includes(gid));
+    if (kept.length !== other.groupIds.length) { other.groupIds = kept; touched.push(other); }
+  }
+  bg.groupIds = (bg.groupIds || []).concat(toAdd);
+  layoutBigGroup(bg, { persist: false });
+  // 被移出组的其他大组也重排，避免原地留下空洞
+  for (const other of touched) layoutBigGroup(other, { persist: false });
+  persistBigGroups();
+  renderItems();
+  renderBigGroups();
+  toast(`已把 ${toAdd.length} 个组放进「${bg.name}」`, 2600);
+}
+
+// 把组从所有大组里移出（用户把整组拖到容器外时调用）。
+// 否则会出现「组还挂在大组里、图片却被拖到容器外」的半脱离状态，
+// 下次容器重排又会把图片吸回去，行为不可预期。
+function removeGroupsFromBigGroup(gids) {
+  const set = new Set(gids);
+  const touched = [];
+  for (const bg of bigGroups) {
+    const kept = (bg.groupIds || []).filter(gid => !set.has(gid));
+    if (kept.length !== (bg.groupIds || []).length) { bg.groupIds = kept; touched.push(bg); }
+  }
+  if (!touched.length) return false;
+  for (const bg of touched) layoutBigGroup(bg, { persist: false });
+  persistBigGroups();
+  renderItems();
+  renderBigGroups();
+  toast(`已把 ${set.size} 个组移出大组，恢复自由摆放`, 2600);
+  return true;
+}
+
+// 屏幕坐标 → 命中的大组容器（后创建的在上层，优先命中）
+function bigGroupAtClient(clientX, clientY) {
+  if (!imageCanvas) return null;
+  const r = imageCanvas.getBoundingClientRect();
+  const wx = (clientX - r.left - view.x) / view.zoom;
+  const wy = (clientY - r.top - view.y) / view.zoom;
+  let hit = null;
+  for (const bg of bigGroups) {
+    if (wx >= bg.x && wx <= bg.x + bg.w && wy >= bg.y && wy <= bg.y + bg.h) hit = bg;
+  }
+  return hit;
+}
+
+/* ---------- 大组幻灯片：按组全屏逐张放映 ---------- */
+let _slideItems = [];
+let _slideIndex = 0;
+let _slideLoadToken = 0;
+
+function slideshowOpen() {
+  return !!slideshowEl && !slideshowEl.hidden;
+}
+function openSlideshow(gid) {
+  const members = getGroupItemObjects(gid).slice();
+  if (!members.length) { toast("这个组里没有可放映的图片", 2400); return; }
+  // 与画布网格一致：先按行（y）再按列（x）排序
+  members.sort((a, b) => (a.y - b.y) || (a.x - b.x));
+  const bg = bigGroupForGroup(gid);
+  const idx = bg ? (bg.groupIds || []).indexOf(gid) : -1;
+  _slideItems = members;
+  _slideIndex = 0;
+  if (slideshowTitle) slideshowTitle.textContent = `组 ${idx >= 0 ? idx + 1 : 1} · ${members.length} 张`;
+  if (slideshowEl) slideshowEl.hidden = false;
+  showSlide(0);
+}
+function showSlide(i) {
+  if (!_slideItems.length || !slideshowImg) return;
+  _slideIndex = Math.max(0, Math.min(i, _slideItems.length - 1));
+  const it = _slideItems[_slideIndex];
+  if (slideshowCounter) slideshowCounter.textContent = `${_slideIndex + 1} / ${_slideItems.length}`;
+  if (slideshowCaption) slideshowCaption.textContent = it.title || "（无标题）";
+  if (slideshowPrev) slideshowPrev.disabled = _slideIndex === 0;
+  if (slideshowNext) slideshowNext.disabled = _slideIndex === _slideItems.length - 1;
+  const token = ++_slideLoadToken;
+  apiReadImageFile(it.folder_id ?? activeFolderId, it.file_path)
+    .then(url => {
+      if (token !== _slideLoadToken || !url) return;
+      slideshowImg.src = url;
+    })
+    .catch(() => {});
+}
+function closeSlideshow() {
+  if (!slideshowEl || slideshowEl.hidden) return;
+  slideshowEl.hidden = true;
+  _slideItems = [];
+  _slideIndex = 0;
+  _slideLoadToken++;
+  if (slideshowImg) slideshowImg.removeAttribute("src");
+}
+function bindSlideshow() {
+  if (!slideshowEl) return;
+  if (slideshowPrev) slideshowPrev.addEventListener("click", () => showSlide(_slideIndex - 1));
+  if (slideshowNext) slideshowNext.addEventListener("click", () => showSlide(_slideIndex + 1));
+  if (slideshowBackdrop) slideshowBackdrop.addEventListener("click", closeSlideshow);
+  if (slideshowClose) slideshowClose.addEventListener("click", closeSlideshow);
+  document.addEventListener("keydown", e => {
+    if (!slideshowOpen()) return;
+    if (e.key === "Escape") { e.preventDefault(); closeSlideshow(); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); showSlide(_slideIndex - 1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); showSlide(_slideIndex + 1); }
+  });
+}
+
 
 /* ---------- 对齐操作（仅对组内多选生效） ----------
  * 对齐基准 = 组内选中的图（selection 里的那部分）。
@@ -685,7 +1131,10 @@ function startCardDrag(e, it, el) {
   } else {
     drags.push({ it, el, sx: it.x, sy: it.y });
   }
+  let lastX = start.x, lastY = start.y;
   const move = (ev) => {
+    lastX = ev.clientX;
+    lastY = ev.clientY;
     const dx = (ev.clientX - start.x) / view.zoom;
     const dy = (ev.clientY - start.y) / view.zoom;
     for (const d of drags) {
@@ -698,6 +1147,20 @@ function startCardDrag(e, it, el) {
     document.removeEventListener("mousemove", move);
     document.removeEventListener("mouseup", up);
     for (const d of drags) debouncedSaveItem(d.it.id);
+    // 拖到某个大组容器里 → 把被拖动的分组整体加入该大组；
+    // 拖到容器外 → 若这些组原本属于某个大组，则整组移出（避免半脱离状态）
+    const target = bigGroupAtClient(lastX, lastY);
+    const gids = new Set();
+    for (const d of drags) {
+      const gid = groupForItem(d.it.id);
+      if (gid) gids.add(gid);
+    }
+    if (target) {
+      if (!gids.size) toast("请先把图片分组，再整组拖进大组", 3000);
+      else addGroupsToBigGroup(target, gids);
+    } else if (gids.size) {
+      removeGroupsFromBigGroup(gids);
+    }
   };
   document.addEventListener("mousemove", move);
   document.addEventListener("mouseup", up);
@@ -1030,8 +1493,10 @@ async function removeItem(id) {
   const gid = groupForItem(id);
   if (gid) {
     groups[gid] = (groups[gid] || []).filter(x => x !== id);
+    // 空组连 persistGroups 都跳过的话，localStorage 里会留下幽灵组；
+    // 这里统一落盘一次（删空组也要写）。
     if (groups[gid].length === 0) delete groups[gid];
-    else persistGroups();
+    persistGroups();
   }
   syncImageToolbarBtns();
   // 同步侧栏计数到内存 folders[] 和 localStorage（之前只改内存，刷新后又归零）
@@ -1600,6 +2065,8 @@ async function loadFolders(keepActive) {
 }
 
 async function setActiveFolder(id) {
+  // 切换图片夹前，先把上一夹的笔记强写盘，避免 300ms 自动保存窗口内切夹丢内容
+  if (_noteFolderId != null && _noteFolderId !== id) flushNoteNow();
   // 保存旧夹的视图
   if (activeFolder && activeFolder.id !== id) {
     await apiSaveFolderView(activeFolder.id, view.x, view.y, view.zoom);
@@ -1613,6 +2080,9 @@ async function setActiveFolder(id) {
     view = { x: 40, y: 40, zoom: 1 };
   }
   items = await apiListItems(id);
+  // 必须等 items 就绪后再加载大组：pruneBigGroups 依赖当前夹的图片列表，
+  // 否则会用旧夹（或空）的 items 把 groupIds 误判成空组清掉。
+  loadBigGroupsForFolder(id);
   // 之前 folders[].total 只由后端写，但 apiSaveImage 从不在后端更新它，
   // 浏览器刷新后侧栏就一直显示 0。这里按当前 items 数回填并同步到 localStorage，
   // 让侧栏计数在刷新后也能正确显示。
@@ -1624,6 +2094,8 @@ async function setActiveFolder(id) {
   applyView();
   renderFolderList();
   renderItems();
+  // 笔记面板开着时，同步切换到新夹的笔记内容
+  if (notePanel && !notePanel.hidden) loadNoteForActive();
 }
 
 // 把某个夹的当前图片数写回内存 folders[] 和 localStorage（浏览器模式），
@@ -1637,6 +2109,136 @@ function syncFolderTotal(f, n) {
   // 这里只要找到对应条目就强制写入，保证 localStorage 与内存一致。
   const lf = lsFolders.find(x => x.id === f.id);
   if (lf) { lf.total = n; lsSave(lsFolders); }
+}
+
+/* ---------- 图片夹富文本笔记 ---------- */
+function isTypingTarget() {
+  const ae = document.activeElement;
+  return !!ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.isContentEditable);
+}
+
+function readNotes() {
+  try {
+    const raw = localStorage.getItem(NOTE_KEY);
+    const map = raw ? JSON.parse(raw) : {};
+    return map && typeof map === "object" ? map : {};
+  } catch { return {}; }
+}
+
+function writeNotes(map) {
+  try { localStorage.setItem(NOTE_KEY, JSON.stringify(map)); } catch { /* 配额不足时静默 */ }
+}
+
+function noteHtmlFor(folderId) {
+  if (folderId == null) return "";
+  const v = readNotes()[String(folderId)];
+  return typeof v === "string" ? v : "";
+}
+
+function setNoteState(text) {
+  if (noteStateEl) noteStateEl.textContent = text;
+}
+
+// 立即把编辑器内容落库到「内容归属的夹」。切夹/收起/关闭前都会调用。
+function flushNoteNow() {
+  if (_noteTimer) { clearTimeout(_noteTimer); _noteTimer = null; }
+  if (!noteEditor || _noteFolderId == null) return;
+  const html = noteEditor.innerHTML.trim();
+  const map = readNotes();
+  if (html) map[String(_noteFolderId)] = html;
+  else delete map[String(_noteFolderId)];
+  writeNotes(map);
+  setNoteState("已保存");
+}
+
+function scheduleNoteSave() {
+  if (_noteFolderId == null) return;
+  setNoteState("保存中…");
+  if (_noteTimer) clearTimeout(_noteTimer);
+  _noteTimer = setTimeout(() => { _noteTimer = null; flushNoteNow(); }, 300);
+}
+
+// 把编辑器绑定到当前激活的图片夹，并载入该夹已保存的内容
+function loadNoteForActive() {
+  if (!noteEditor) return;
+  _noteFolderId = activeFolderId;
+  noteEditor.innerHTML = noteHtmlFor(activeFolderId);
+  setNoteState(activeFolderId == null ? "先新建图片夹" : "已保存");
+}
+
+function openNotePanel() {
+  if (!notePanel || !noteEditor) return;
+  if (activeFolderId == null) { toast("请先新建或选择一个图片夹", 2200); return; }
+  notePanel.hidden = false;
+  if (noteFab) noteFab.setAttribute("aria-expanded", "true");
+  loadNoteForActive();
+  noteEditor.focus();
+  // 光标放到末尾，方便继续记录
+  const sel = window.getSelection();
+  if (sel) {
+    const range = document.createRange();
+    range.selectNodeContents(noteEditor);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+}
+
+function closeNotePanel() {
+  if (!notePanel || notePanel.hidden) return;
+  flushNoteNow();
+  notePanel.hidden = true;
+  if (noteFab) noteFab.setAttribute("aria-expanded", "false");
+}
+
+function toggleNotePanel() {
+  if (!notePanel) return;
+  if (notePanel.hidden) openNotePanel();
+  else closeNotePanel();
+}
+
+function bindNote() {
+  if (!noteFab || !notePanel || !noteEditor) return;
+  noteFab.addEventListener("click", toggleNotePanel);
+  if (noteCloseBtn) noteCloseBtn.addEventListener("click", closeNotePanel);
+
+  // 工具栏：mousedown 阻止默认行为，避免编辑器失焦丢失选区
+  if (noteToolbar) {
+    noteToolbar.addEventListener("mousedown", e => e.preventDefault());
+    noteToolbar.addEventListener("click", e => {
+      const btn = e.target.closest("button[data-cmd]");
+      if (!btn) return;
+      e.preventDefault();
+      noteEditor.focus();
+      try { document.execCommand(btn.dataset.cmd, false, null); } catch { /* 忽略 */ }
+      scheduleNoteSave();
+    });
+  }
+
+  noteEditor.addEventListener("input", scheduleNoteSave);
+
+  // 粘贴/拖入统一转为纯文本，避免外部 HTML 破坏样式或带入脚本
+  noteEditor.addEventListener("paste", e => {
+    e.preventDefault();
+    const text = e.clipboardData ? e.clipboardData.getData("text/plain") : "";
+    if (text) document.execCommand("insertText", false, text);
+  });
+  noteEditor.addEventListener("drop", e => {
+    e.preventDefault();
+    const text = e.dataTransfer ? e.dataTransfer.getData("text/plain") : "";
+    if (text) document.execCommand("insertText", false, text);
+  });
+
+  noteEditor.addEventListener("keydown", e => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeNotePanel(); }
+  });
+
+  // 关闭/隐藏窗口前兜底保存
+  window.addEventListener("pagehide", flushNoteNow);
+  window.addEventListener("beforeunload", flushNoteNow);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushNoteNow();
+  });
 }
 
 /* ---------- 画布事件：平移 / 缩放 / 双击上传 ---------- */
@@ -1667,6 +2269,8 @@ function bindCanvasEvents() {
 
   imageCanvas.addEventListener("wheel", e => {
     if (!activeFolder) return;
+    // 笔记面板内的滚轮用于滚动笔记内容，不要缩放画布
+    if (e.target.closest && e.target.closest(".image-note-panel")) return;
     e.preventDefault();
     const r = imageCanvas.getBoundingClientRect();
     const cx = e.clientX - r.left, cy = e.clientY - r.top;
@@ -1685,6 +2289,7 @@ function bindCanvasEvents() {
   // 拖文件到画布
   imageCanvas.addEventListener("dragover", e => {
     e.preventDefault();
+    if (e.target.closest && e.target.closest(".image-note-panel")) return;
     e.dataTransfer.dropEffect = "copy";
     imageCanvas.classList.add("drop-hover");
   });
@@ -1695,6 +2300,8 @@ function bindCanvasEvents() {
   imageCanvas.addEventListener("drop", async e => {
     e.preventDefault();
     imageCanvas.classList.remove("drop-hover");
+    // 拖到笔记面板上不触发图片上传
+    if (e.target.closest && e.target.closest(".image-note-panel")) return;
     const files = Array.from(e.dataTransfer.files || []).filter(f => /^image\//.test(f.type));
     if (!files.length) return;
     // uploadFile 内部会在没有激活夹时自动创建夹，所以这里直接遍历上传即可
@@ -1712,7 +2319,7 @@ function bindCanvasEvents() {
   document.addEventListener("paste", async e => {
     // 仅在图片模式且有画布可见时响应
     if (!imagePane || imagePane.hidden) return;
-    if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
+    if (isTypingTarget()) return;
     if (_renaming) return;
     const items2 = e.clipboardData?.items || [];
     const imgs = [];
@@ -1757,6 +2364,7 @@ function bindToolbar() {
     // uploadFile 内部会在没有夹时自动创建夹。
     imageFileInput.click();
   });
+  if (imageBigGroupBtn) imageBigGroupBtn.addEventListener("click", createBigGroup);
   if (imageCopyBtn)  imageCopyBtn.addEventListener("click", () => copySelection());
   if (imageCopyOnlyBtn) imageCopyOnlyBtn.addEventListener("click", () => copyImageOnly());
   if (imageCutBtn)   imageCutBtn.addEventListener("click",  () => cutSelection());
@@ -1800,7 +2408,8 @@ function hasActiveTextSelection() {
 function bindKeyboard() {
   document.addEventListener("keydown", async e => {
     if (!imagePane || imagePane.hidden) return;
-    if (document.activeElement && (document.activeElement.tagName === "INPUT" || document.activeElement.tagName === "TEXTAREA")) return;
+    if (slideshowOpen()) return; // 放映中，方向键/Esc 由幻灯片自己处理
+    if (isTypingTarget()) return;
     if (_renaming) return;
     // 用户框选了可见文字时，Ctrl+C / Ctrl+X 一律走浏览器原生复制，不劫持。
     const textSelected = hasActiveTextSelection();
@@ -2067,6 +2676,8 @@ function init() {
   bindKeyboard();
   bindNewFolderBtn();
   bindCardLightbox();
+  bindNote();
+  bindSlideshow();
   // 暴露给 mindmap.js 的 setMode 钩子
   window.__loadImageWall = () => loadFolders(true);
   // 初始加载一次（如果图片 tab 一开始就是 active 会显示）

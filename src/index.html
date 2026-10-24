@@ -140,10 +140,11 @@
             <div class="stage-header" id="image-header">
               <h2 id="image-title">图片墙</h2>
               <span class="meta" id="image-meta"></span>
-              <span class="hint"><kbd>双击空白</kbd> 上传 · <kbd>Ctrl+V</kbd> 粘贴 · 拖拽图片到画布 · <kbd>滚轮</kbd> 缩放 · 拖空白平移</span>
+              <span class="hint"><kbd>双击空白</kbd> 上传 · <kbd>Ctrl+V</kbd> 粘贴 · 拖拽图片到画布 · <kbd>滚轮</kbd> 缩放 · 拖空白平移 · 右下角 <b>📝</b> 记笔记</span>
             </div>
             <div class="mind-toolbar" id="image-toolbar" hidden>
               <button id="image-add" title="上传图片">＋ 上传</button>
+              <button id="image-biggroup" title="创建大组容器：把已分组的图片整组拖进去，双击组可放映">🧺 新建大组</button>
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="image-copy"       title="复制选中的图片到剪贴板（Ctrl+C，含描述文字）" hidden>📋 复制</button>
               <button id="image-copy-only"  title="仅复制图片本身（Ctrl+Shift+C，不含描述文字）" hidden>🖼 仅复制图片</button>
@@ -176,6 +177,36 @@
               或按 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴 · 直接把图片拖进画布<br />
               图片会保存到本地并按当前图片夹归档
             </div>
+
+            <!-- 图片夹富文本笔记：右下角悬浮图标 + 按夹保存的笔记面板 -->
+            <button class="image-note-fab" id="image-note-fab" type="button"
+                    title="图片夹笔记（富文本）" aria-label="打开图片夹笔记" aria-expanded="false">
+              <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true">
+                <path d="M5 3.5h9.5L19 8v12a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 4 20V5a1.5 1.5 0 0 1 1.5-1.5Z"
+                      fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M14.5 3.5V8H19" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/>
+                <path d="M8 12.5h8M8 16h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+              </svg>
+            </button>
+            <section class="image-note-panel" id="image-note-panel" hidden aria-label="图片夹富文本笔记">
+              <div class="image-note-head">
+                <span class="image-note-title">📝 图片夹笔记</span>
+                <span class="image-note-state" id="image-note-state">自动保存</span>
+                <button class="image-note-close" id="image-note-close" type="button" title="收起笔记">✕</button>
+              </div>
+              <div class="image-note-tools" role="toolbar" aria-label="笔记格式工具">
+                <button type="button" data-cmd="bold" title="加粗（Ctrl+B）"><b>B</b></button>
+                <button type="button" data-cmd="italic" title="斜体（Ctrl+I）"><i>I</i></button>
+                <button type="button" data-cmd="underline" title="下划线（Ctrl+U）"><u>U</u></button>
+                <span class="image-note-sep" aria-hidden="true"></span>
+                <button type="button" data-cmd="insertUnorderedList" title="无序列表">• 列表</button>
+                <button type="button" data-cmd="insertOrderedList" title="有序列表">1. 列表</button>
+                <span class="image-note-sep" aria-hidden="true"></span>
+                <button type="button" data-cmd="removeFormat" title="清除格式">⌫ 清除</button>
+              </div>
+              <div class="image-note-editor" id="image-note-editor" contenteditable="true"
+                   spellcheck="false" data-placeholder="记录当前图片夹的要点…"></div>
+            </section>
           </div>
         </div>
       </main>
@@ -328,6 +359,24 @@
         <span id="img-lightbox-zoom-label">100%</span>
         <button id="img-lightbox-zoom-in" title="放大">＋</button>
         <button id="img-lightbox-reset" title="重置缩放">⟲ 重置</button>
+      </div>
+    </div>
+
+    <!-- 图片大组幻灯片：双击大组内的组后，按组全屏逐张放映 -->
+    <div class="slide-show" id="image-slideshow" hidden>
+      <div class="slide-backdrop" id="slideshow-backdrop"></div>
+      <div class="slide-head">
+        <span class="slide-title" id="slideshow-title">组幻灯片</span>
+        <span class="slide-counter" id="slideshow-counter">1 / 1</span>
+        <button class="slide-close" id="slideshow-close" title="关闭（Esc）">×</button>
+      </div>
+      <div class="slide-stage">
+        <button class="slide-nav prev" id="slideshow-prev" title="上一张（←）">‹</button>
+        <img class="slide-img" id="slideshow-img" alt="" draggable="false" />
+        <button class="slide-nav next" id="slideshow-next" title="下一张（→）">›</button>
+      </div>
+      <div class="slide-foot">
+        <span id="slideshow-caption"></span>
       </div>
     </div>
 
