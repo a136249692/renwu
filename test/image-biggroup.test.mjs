@@ -108,16 +108,35 @@ test("大组列数设置：默认 3 列、下拉切换后重排并持久化", ()
   assert.ok(/persistBigGroups\(\)/.test(ev), "列数应持久化");
 });
 
-test("固定列数时同组图片按网格并排、单元格统一尺寸（方便对比）", () => {
+test("一列就是一组：每组独占一列，组内图片纵向叠放、列宽由大组列数决定", () => {
   const body = fnBody("layoutBigGroup");
   assert.ok(/const cols = Math\.max\(0, Math\.round\(Number\(bg\.cols\) \|\| 0\)\)/.test(body),
     "应读取大组的 cols");
-  assert.ok(/const effCols = Math\.min\(cols, members\.length\)/.test(body),
-    "列数多于图片数时按实际张数取列");
-  assert.ok(/it\.width = cellW/.test(body) && /it\.height = cellH/.test(body),
-    "同一组的图片应统一单元格尺寸");
-  assert.ok(/const col = i % effCols/.test(body) && /const row = Math\.floor\(i \/ effCols\)/.test(body),
-    "应按列/行定位，保证并排不重叠");
+  assert.ok(/const cellW = Math\.max\(40, Math\.floor\(\(innerW - BG_ITEM_GAP \* \(cols - 1\)\) \/ cols\)\)/.test(body),
+    "列宽应按大组列数等分（与组内张数无关）");
+  assert.ok(/for \(let start = 0; start < groups\.length; start \+= cols\)/.test(body),
+    "组数超过列数时应换到下一排");
+  assert.ok(/const x = originX \+ colIdx \* \(cellW \+ BG_ITEM_GAP\)/.test(body),
+    "每个组占一列：x 由组序号决定");
+  assert.ok(/contentTop \+ i \* colStepY/.test(body),
+    "组内图片在同一列里纵向叠放");
+  assert.ok(/const colStepY = cellH \+ BG_CAPTION_H \+ BG_ITEM_GAP/.test(body),
+    "纵向步进应含描述栏高度，避免上下重叠");
+  assert.ok(/Math\.max\(\.\.\.rowGroups\.map\(g => g\.members\.length\)\)/.test(body),
+    "同一排按最高的一列对齐，分组框底部齐平");
+  assert.ok(!/effCols/.test(body), "不应再按组内张数收缩列数");
+});
+
+test("2 张的组也只占一列（不再铺满整行），且列宽与其它组一致", () => {
+  const body = fnBody("layoutBigGroup");
+  assert.ok(!/i % cols/.test(body), "组内图片不应横向铺开占多列");
+  // 用真实尺寸验证：4 列下，2 张的组与 4 张的组列宽一致，且第二组落在第 2 列
+  const innerW = 700 - 14 * 2 - 10 * 2;
+  const gap = 8, cols = 4;
+  const cellW = Math.max(40, Math.floor((innerW - gap * (cols - 1)) / cols));
+  const x1 = 0, x2 = cellW + gap;
+  assert.ok(x2 + cellW < innerW, "第 2 组应落在第 2 列，右侧仍留空");
+  assert.ok(x1 === 0 && x2 === cellW + gap, "各列等宽、等间距");
 });
 
 // ---------- 拖组入大组 ----------

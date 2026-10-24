@@ -232,6 +232,7 @@ const imageUncombineBtn = $("image-uncombine");
 const imageGroupBtn   = $("image-group");
 const imageUngroupBtn = $("image-ungroup");
 const imageTidyBtn    = $("image-tidy");
+const imageTidyVBtn   = $("image-tidy-v");
 const imageAlignLeftBtn    = $("align-left");
 const imageAlignRightBtn   = $("align-right");
 const imageAlignTopBtn     = $("align-top");
@@ -621,7 +622,11 @@ function syncImageToolbarBtns() {
   // 整理按钮：选中 ≥2 张即可用（组内图片点选一张会连带整组选中）
   if (imageTidyBtn) {
     imageTidyBtn.hidden = selection.size < 2;
-    if (selection.size >= 2) imageTidyBtn.title = `自动整理选中的 ${selection.size} 张：按网格排开，消除重叠`;
+    if (selection.size >= 2) imageTidyBtn.title = `左右整理选中的 ${selection.size} 张：按网格排开，消除重叠`;
+  }
+  if (imageTidyVBtn) {
+    imageTidyVBtn.hidden = selection.size < 2;
+    if (selection.size >= 2) imageTidyVBtn.title = `上下整理选中的 ${selection.size} 张：自上而下纵向排开、向左靠齐`;
   }
 }
 /* ---------- 分组 / 解散按钮显隐 ---------- */
@@ -728,69 +733,77 @@ function createBigGroup() {
   toast("已创建大组：把已分组的图片整组拖进框内，双击组即可放映", 4200);
 }
 
-// 把组内图片按网格排进大组；返回容器所需高度
+// 把组排进大组：cols >= 2 时【一列就是一组】——每组独占一列，组内图片在该列纵向叠放；
+// 组数超过列数时换到下一排。cols = 0 时沿用「按图片原尺寸自适应换行」的旧行为。
 function layoutBigGroup(bg, opts = {}) {
   const save = opts.save !== false;
   const subW = Math.max(220, bg.w - BG_PAD * 2);
   const innerW = Math.max(120, subW - BG_SUB_PAD * 2);
-  // cols >= 2 时按固定列数排列：单元格统一尺寸，同一组的图片并排成网格，
-  // 方便横向对比；0 / 1 则沿用「按图片原尺寸自适应换行」的旧行为。
   const cols = Math.max(0, Math.round(Number(bg.cols) || 0));
+  const originX = bg.x + BG_PAD + BG_SUB_PAD;
+  const groups = (bg.groupIds || [])
+    .map(gid => ({ gid, members: getGroupItemObjects(gid) }))
+    .filter(g => g.members.length > 0);
   let cursorY = bg.y + BG_HEAD_H + BG_PAD;
-  for (const gid of bg.groupIds || []) {
-    const members = getGroupItemObjects(gid);
-    if (!members.length) continue;
-    const contentTop = cursorY + BG_SUB_LABEL_H + BG_SUB_PAD;
-    let contentH = 0;
-    if (cols >= 2) {
-      // 组内张数少于列数时按实际张数取列，避免留空槽把图挤小
-      const effCols = Math.min(cols, members.length);
-      const cellW = Math.floor((innerW - BG_ITEM_GAP * (effCols - 1)) / effCols);
-      // 图片区固定 4:3 单元格，img 用 contain 完整显示，不会裁切
-      const cellH = Math.round(cellW * 3 / 4);
-      members.forEach((it, i) => {
-        const col = i % effCols;
-        const row = Math.floor(i / effCols);
-        it.width = cellW;
-        it.height = cellH;
-        it.x = bg.x + BG_PAD + BG_SUB_PAD + col * (cellW + BG_ITEM_GAP);
-        it.y = contentTop + row * (cellH + BG_CAPTION_H + BG_ITEM_GAP);
-        const el = itemEls.get(it.id);
-        if (el) {
-          el.style.left = it.x + "px";
-          el.style.top = it.y + "px";
-          el.style.width = cellW + "px";
-          const wrapEl = el.querySelector(".card-img-wrap");
-          if (wrapEl) wrapEl.style.height = cellH + "px";
-        }
-        if (save) debouncedSaveItem(it.id);
+
+  const placeItem = (it, x, y) => {
+    it.x = x;
+    it.y = y;
+    const el = itemEls.get(it.id);
+    if (el) {
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      el.style.width = it.width + "px";
+      const wrapEl = el.querySelector(".card-img-wrap");
+      if (wrapEl) wrapEl.style.height = it.height + "px";
+    }
+    if (save) debouncedSaveItem(it.id);
+  };
+
+  if (cols >= 2) {
+    // 单元格宽度按大组列数等分：无论组里有 2 张还是 5 张，图片尺寸都一致，便于对比
+    const cellW = Math.max(40, Math.floor((innerW - BG_ITEM_GAP * (cols - 1)) / cols));
+    const cellH = Math.round(cellW * 3 / 4);   // 图片区固定 4:3，img 用 contain 完整显示
+    const colStepY = cellH + BG_CAPTION_H + BG_ITEM_GAP;
+    for (let start = 0; start < groups.length; start += cols) {
+      const rowGroups = groups.slice(start, start + cols);
+      const contentTop = cursorY + BG_SUB_LABEL_H + BG_SUB_PAD;
+      // 同一排的各列按「最高的一列」对齐，保证这排的分组框底部齐平
+      const maxCount = Math.max(...rowGroups.map(g => g.members.length));
+      rowGroups.forEach((g, colIdx) => {
+        const x = originX + colIdx * (cellW + BG_ITEM_GAP);
+        g.members.forEach((it, i) => {
+          it.width = cellW;
+          it.height = cellH;
+          placeItem(it, x, contentTop + i * colStepY);
+        });
       });
-      const rows = Math.ceil(members.length / effCols);
-      contentH = rows * (cellH + BG_CAPTION_H) + (rows - 1) * BG_ITEM_GAP;
-    } else {
-      let cx = bg.x + BG_PAD + BG_SUB_PAD;
+      const blockH = maxCount * (cellH + BG_CAPTION_H) + (maxCount - 1) * BG_ITEM_GAP;
+      cursorY = contentTop + blockH + BG_SUB_PAD + BG_PAD;
+    }
+  } else {
+    for (const { members } of groups) {
+      const contentTop = cursorY + BG_SUB_LABEL_H + BG_SUB_PAD;
+      let cx = originX;
       let rowTop = 0;
       let rowH = 0;
       for (const it of members) {
         const w = Math.max(80, it.width || CARD_DEFAULT_W);
         const h = Math.max(60, it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
-        if (cx > bg.x + BG_PAD + BG_SUB_PAD && cx + w > bg.x + BG_PAD + BG_SUB_PAD + innerW) {
-          cx = bg.x + BG_PAD + BG_SUB_PAD;
+        if (cx > originX && cx + w > originX + innerW) {
+          cx = originX;
           rowTop += rowH + BG_ITEM_GAP;
           rowH = 0;
         }
-        it.x = cx;
-        it.y = contentTop + rowTop;
-        const el = itemEls.get(it.id);
-        if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+        it.width = w;
+        placeItem(it, cx, contentTop + rowTop);
         cx += w + BG_ITEM_GAP;
         rowH = Math.max(rowH, h);
-        if (save) debouncedSaveItem(it.id);
       }
-      contentH = rowH > 0 ? rowTop + rowH : 0;
+      cursorY = contentTop + (rowH > 0 ? rowTop + rowH : 0) + BG_SUB_PAD + BG_PAD;
     }
-    cursorY = contentTop + contentH + BG_SUB_PAD + BG_PAD;
   }
+
   const needed = Math.round(cursorY - bg.y);
   // 自动高度：随组数量撑开/回缩（至少保留默认 300，避免空容器缩成一条）；
   // 手动拖过右下角后 autoH=false，只保证「够装」，不主动缩小用户设定的高度。
@@ -1211,11 +1224,15 @@ function applyAlignment(which) {
   const label = { "left":"左对齐","right":"右对齐","top":"上对齐","bottom":"下对齐","center-h":"水平居中","center-v":"垂直居中" }[which] || "对齐";
   toast(`${label}（${sel.length} 张）`);
 }
-/* ---------- 自动整理：把选中的图片按网格排开，消除重叠 ----------
-   用户反馈：分组后图片可能互相叠在一起。这里按「上→下、左→右」的阅读顺序
-   重排到一张网格里，单元格取选中项的最大尺寸，因此任何两张都不会重叠。
+/* ---------- 自动整理：消除选中图片的重叠 ----------
+   用户反馈：分组后图片可能互相叠在一起。提供两种整理方式：
+   · 左右整理（mode = "grid"）：按「上→下、左→右」的阅读顺序排成网格，
+     单元格取选中项的最大尺寸，任何两张都不会重叠。
+   · 上下整理（mode = "v"）：所有图片从上到下纵向叠放并向左靠齐，
+     每张保持自己的尺寸，依次留 GAP 间距。
    大组内的图片由容器自动排版，不允许手动整理（否则会被容器重排覆盖）。 */
-function autoArrangeSelection() {
+function autoArrangeSelection(mode = "grid") {
+  const vertical = mode === "v";
   const sel = items.filter(it => selection.has(it.id));
   if (sel.length < 2) { toast("请至少选中 2 张图片再整理", 2500); return; }
   const inBig = sel.find(it => {
@@ -1232,6 +1249,24 @@ function autoArrangeSelection() {
   });
   const minX = Math.min(...sel.map(it => it.x));
   const minY = Math.min(...sel.map(it => it.y));
+
+  if (vertical) {
+    // 上下整理：左边缘统一到 minX，逐张向下排（高度按各自的图片区 + 描述栏算）
+    let y = Math.round(minY);
+    ordered.forEach(it => {
+      const w = it.width || CARD_DEFAULT_W;
+      const h = it.height || CARD_DEFAULT_W;
+      it.x = Math.round(minX);
+      it.y = y;
+      const el = itemEls.get(it.id);
+      if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
+      apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+      y += h + BG_CAPTION_H + GAP;
+    });
+    toast(`已上下整理 ${sel.length} 张（自上而下、向左靠齐）`, 2200);
+    return;
+  }
+
   const cellW = Math.max(...sel.map(it => it.width || CARD_DEFAULT_W));
   const cellH = Math.max(...sel.map(it => (it.height || CARD_DEFAULT_W) + BG_CAPTION_H));
   const cols = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
@@ -1244,7 +1279,7 @@ function autoArrangeSelection() {
     if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
     apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
   });
-  toast(`已自动整理 ${sel.length} 张（${cols} 列，无重叠）`, 2200);
+  toast(`已左右整理 ${sel.length} 张（${cols} 列，无重叠）`, 2200);
 }
 function bringToFront(it) {
   // 分组语义：把整组都拉到前面，否则组内 z 序会乱
@@ -2567,7 +2602,8 @@ function bindToolbar() {
   if (imageUncombineBtn) imageUncombineBtn.addEventListener("click", () => uncombineSelected());
   if (imageGroupBtn) imageGroupBtn.addEventListener("click", () => groupSelected());
   if (imageUngroupBtn) imageUngroupBtn.addEventListener("click", () => ungroupSelected());
-  if (imageTidyBtn)    imageTidyBtn.addEventListener("click",    () => autoArrangeSelection());
+  if (imageTidyBtn)    imageTidyBtn.addEventListener("click",    () => autoArrangeSelection("grid"));
+  if (imageTidyVBtn)   imageTidyVBtn.addEventListener("click",   () => autoArrangeSelection("v"));
   if (imageAlignLeftBtn)    imageAlignLeftBtn.addEventListener("click", () => applyAlignment("left"));
   if (imageAlignRightBtn)   imageAlignRightBtn.addEventListener("click", () => applyAlignment("right"));
   if (imageAlignTopBtn)     imageAlignTopBtn.addEventListener("click", () => applyAlignment("top"));

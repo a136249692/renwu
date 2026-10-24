@@ -1242,6 +1242,7 @@ mark {
   color: var(--text); border-radius: 7px; padding: 4px 10px; font-size: 12px;
   font-family: inherit; font-weight: 500; cursor: var(--cursor-arrow);
   transition: all 0.18s var(--ease); box-shadow: var(--sh-xs);
+  white-space: nowrap;   /* 按钮文字不换行，避免「左右整理」被折成两行 */
 }
 .mind-toolbar button:hover { background: rgba(255,255,255,0.92); box-shadow: var(--sh-sm); }
 /* 字号到达上下限时禁用 A−／A＋（禁用态不响应 hover 高亮） */
@@ -1276,14 +1277,6 @@ mark {
 .mind-edge-temp { fill: none; stroke: var(--accent); stroke-width: 2.2; stroke-dasharray: 6 5; pointer-events: none; }
 
 .mind-nodes { position: absolute; top: 0; left: 0; z-index: 2; }
-/* 思维分组：包住整组的虚线框（纯视觉，不拦截鼠标） */
-.mind-groups { position: absolute; top: 0; left: 0; width: 0; height: 0; }
-.mind-group-box {
-  position: absolute; z-index: 1; pointer-events: none;
-  border: 2px dashed rgba(99, 102, 241, 0.45);
-  border-radius: 16px;
-  background: rgba(99, 102, 241, 0.045);
-}
 .mind-node {
   position: absolute; width: 210px; min-height: 64px; background: #fff;
   border: 2px solid transparent; border-radius: 13px;

@@ -88,26 +88,44 @@ test("card-img 使用 object-fit: contain，完整显示不裁切", () => {
 
 // ---------- 自动整理：消除组内重叠 ----------
 
-test("工具栏提供「整理」按钮，选中 ≥2 张时可用", () => {
-  assert.ok(/id="image-tidy"/.test(HTML), "图片工具栏应有整理按钮");
+test("工具栏提供「左右整理 / 上下整理」按钮，选中 ≥2 张时可用", () => {
+  assert.ok(/id="image-tidy"/.test(HTML), "图片工具栏应有左右整理按钮");
+  assert.ok(/id="image-tidy-v"/.test(HTML), "图片工具栏应有上下整理按钮");
   const sync = IMG_CODE.slice(IMG_CODE.indexOf("function syncImageToolbarBtns"));
   const body = sync.slice(0, sync.indexOf("\n}\n") + 3);
-  assert.ok(/imageTidyBtn\.hidden = selection\.size < 2/.test(body),
-    "只在选中 ≥2 张时显示整理按钮");
+  assert.ok(/imageTidyBtn\.hidden = selection\.size < 2/.test(body), "左右整理只在选中 ≥2 张时显示");
+  assert.ok(/imageTidyVBtn\.hidden = selection\.size < 2/.test(body), "上下整理只在选中 ≥2 张时显示");
+  const bind = IMG_CODE.slice(IMG_CODE.indexOf("function bindToolbar"));
+  const bbody = bind.slice(0, bind.indexOf("\n}\n") + 3);
+  assert.ok(/autoArrangeSelection\("grid"\)/.test(bbody), "左右整理应走网格模式");
+  assert.ok(/autoArrangeSelection\("v"\)/.test(bbody), "上下整理应走纵向模式");
 });
 
-test("自动整理按网格排开、单元格含描述栏高度，保证不重叠", () => {
+test("左右整理按网格排开、单元格含描述栏高度，保证不重叠", () => {
   const fn = IMG_CODE.slice(IMG_CODE.indexOf("function autoArrangeSelection"));
   const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
-  assert.ok(/Math\.ceil\(Math\.sqrt\(ordered\.length\)\)/.test(body),
+  const grid = body.slice(body.indexOf("const cellW"));
+  assert.ok(/Math\.ceil\(Math\.sqrt\(ordered\.length\)\)/.test(grid),
     "应按近似方形网格分列");
-  assert.ok(/const cellW = Math\.max/.test(body) && /const cellH = Math\.max/.test(body),
+  assert.ok(/const cellW = Math\.max/.test(grid) && /const cellH = Math\.max/.test(grid),
     "单元格应取选中项的最大尺寸");
-  assert.ok(/\+ BG_CAPTION_H/.test(body), "行高必须包含底部描述栏，否则仍会压到下一张");
-  assert.ok(/\(i % cols\) \* \(cellW \+ GAP\)/.test(body) &&
-    /Math\.floor\(i \/ cols\) \* \(cellH \+ GAP\)/.test(body),
+  assert.ok(/\+ BG_CAPTION_H/.test(grid), "行高必须包含底部描述栏，否则仍会压到下一张");
+  assert.ok(/\(i % cols\) \* \(cellW \+ GAP\)/.test(grid) &&
+    /Math\.floor\(i \/ cols\) \* \(cellH \+ GAP\)/.test(grid),
     "应按列/行 + 间距定位");
   assert.ok(/apiUpdateItem\(/.test(body), "整理后应落盘");
+});
+
+test("上下整理：自上而下纵向叠放、统一左边缘，并保留每张自身尺寸", () => {
+  const fn = IMG_CODE.slice(IMG_CODE.indexOf("function autoArrangeSelection"));
+  const body = fn.slice(0, fn.indexOf("\n}\n") + 3);
+  const v = body.slice(body.indexOf("if (vertical)"), body.indexOf("const cellW"));
+  assert.ok(/it\.x = Math\.round\(minX\)/.test(v), "所有图片左边缘对齐到最左的 x");
+  assert.ok(/y \+= h \+ BG_CAPTION_H \+ GAP/.test(v),
+    "纵向步进 = 图片高 + 描述栏 + 间距，保证上下不重叠");
+  assert.ok(!/it\.width\s*=/.test(v) && !/it\.height\s*=/.test(v),
+    "上下整理不应改变每张图片的尺寸");
+  assert.ok(/apiUpdateItem\(/.test(v), "上下整理后应落盘");
 });
 
 test("大组内的图片不参与手动整理（避免被容器重排覆盖）", () => {
