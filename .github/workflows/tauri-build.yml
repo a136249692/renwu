@@ -238,10 +238,18 @@ jobs:
           echo "Done. GitHub release latest.json now points to CNB."
 
           echo ""
-          echo "Waiting for GitHub CDN to propagate (avoid false FAIL below)..."
-          sleep 10
-
-          echo "--- verify by downloading from GitHub ---"
-          curl -fSL --retry 3 -o verify.json "https://github.com/${GH_REPO}/releases/download/${TAG}/latest.json"
-          grep -q "${CNB_BASE}" verify.json && echo "OK: GitHub latest.json now references CNB" || { echo "FAIL: CNB URL not found in GitHub latest.json"; exit 1; }
+          echo "Verifying GitHub release latest.json (retry until CDN refreshes)..."
+          ok=0
+          for i in $(seq 1 12); do
+            sleep 10
+            # 带时间戳查询参数绕过 CDN 缓存：否则刚覆写的 latest.json 会读到旧缓存，误报 FAIL
+            if curl -fsSL -o verify.json "https://github.com/${GH_REPO}/releases/download/${TAG}/latest.json?cb=$(date +%s)-${i}" \
+               && grep -q "${CNB_BASE}" verify.json; then
+              ok=1
+              echo "OK: GitHub latest.json now references CNB (attempt ${i})"
+              break
+            fi
+            echo "attempt ${i}/12: CDN still serving old latest.json, retrying..."
+          done
+          [ "${ok}" = "1" ] || { echo "FAIL: CNB URL not found in GitHub latest.json"; exit 1; }
         shell: bash
