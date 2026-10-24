@@ -387,9 +387,13 @@ function renderItems() {
     el.style.left = it.x + "px";
     el.style.top = it.y + "px";
     el.style.width = (it.width || CARD_DEFAULT_W) + "px";
-    // 必须显式设 height：新 flex 布局下 wrap 靠 flex:1 填满剩余空间，
-    // 若父容器没有明确高度，wrap 就永远只按 min-height(8px) 撑开，卡片会缩成一条线。
-    el.style.height = (it.height || CARD_DEFAULT_W) + "px";
+    // it.width/it.height 描述的是「图片显示区域」的尺寸，不含底部描述栏。
+    // 卡片高度交给内容自动撑开（wrap = 图片区，caption 另占一行），
+    // 否则把 caption 也算进固定高度时，wrap 会被压扁、图片底部被描述栏裁掉
+    // （用户反馈：「描述内容会挡住一部分图片内容」）。
+    el.style.height = "";
+    const wrapEl = el.querySelector(".card-img-wrap");
+    if (wrapEl) wrapEl.style.height = (it.height || CARD_DEFAULT_W) + "px";
     el.style.zIndex = it.z || zTop++;
     el.classList.toggle("selected", selection.has(it.id));
     el.classList.toggle("grouped", !!groupForItem(it.id));
@@ -700,21 +704,24 @@ function startCardDrag(e, it, el) {
 }
 
 /* ---------- 拖拽：缩放 ----------
- * 使用 flex 列布局：wrap 用 flex:1 自动填满 caption 之外的空间。
- * 这里只改 width/height 两个 inline 样式，不再写 aspectRatio，
- * 否则 aspect-ratio 会和 flex 高度分配冲突，导致 se/s 手柄无法真正缩小。 */
+ * 卡片高度由「图片区(wrap) + 描述栏」自动撑开，it.height 只表示图片区高度。
+ * 因此缩放时改 wrap 高度而不是卡片总高度；否则会把描述栏一起算进去，
+ * 拖动与预期不符（且图片区又被压缩）。不写 aspectRatio，避免与手动缩放冲突。 */
 function startResize(e, it, el) {
   const dir = e.target.dataset.dir;
   const sx = e.clientX, sy = e.clientY;
   const w0 = it.width || CARD_DEFAULT_W;
-  const h0 = it.height || el.offsetHeight;
+  // it.height 是图片区高度；旧数据同样按这个语义解释（caption 不占用它）。
+  // 兜底取 wrap 实测高度，避免 it.height 为 0 时从卡片总高（含 caption）起算。
+  const wrapEl = el.querySelector(".card-img-wrap");
+  const h0 = it.height || (wrapEl ? wrapEl.offsetHeight : el.offsetHeight);
   const move = (ev) => {
     const dx = (ev.clientX - sx) / view.zoom;
     const dy = (ev.clientY - sy) / view.zoom;
     if (dir === "se" || dir === "e") it.width = Math.max(80, w0 + dx);
     if (dir === "se" || dir === "s") it.height = Math.max(80, h0 + dy);
     el.style.width = it.width + "px";
-    el.style.height = it.height + "px";
+    if (wrapEl) wrapEl.style.height = it.height + "px";
   };
   const up = () => {
     document.removeEventListener("mousemove", move);

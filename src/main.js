@@ -1320,6 +1320,9 @@ function renderAll() {
     applyStickyLayout();
     applyStickySearch();
     renderStickyHeader();
+    // 便利贴夹同样按夹记忆滚动位置——此前只有普通夹分支调用 restoreScroll，
+    // 便利贴夹的内容块一多、滚到偏下位置后重开就必然回到顶端。
+    restoreScroll();
   } else {
     relayout(false);
     restoreScroll();
@@ -3247,31 +3250,76 @@ $("restore-btn").addEventListener("click", async () => {
 
 /* ---------- 滚动位置记忆 ----------
    按任务夹 ID 独立记住离开时的滚动位置；找不到记录时回到 (0,0)，
-   避免沿用上一个任务夹的 y 值被浏览器 clamp 到新任务夹底部。 */
+   避免沿用上一个任务夹的 y 值被浏览器 clamp 到新任务夹底部。
+
+   稳健性（修复打包版「重开回顶」）：
+   冷启动时数据经异步 IPC 载入、布局分帧完成。若在内容高度尚未就绪时写入
+   scrollTop，浏览器会把它 clamp 到当前可滚动最大值（常常是 0），并派发 scroll
+   事件把 clamp 后的「假位置」回写保存——于是下次启动就彻底丢了位置。
+   因此改成「目标值 + 多帧重试 + 稳定前不回写」：
+     · restoreScroll 记录目标位置，并在随后几帧/若干短延时内重复尝试，
+       直到内容高度足以容纳目标为止（数据/布局晚就绪也能最终到位）；
+     · 恢复期间由浏览器 clamp 触发、或与恢复同帧到来的 scroll 事件一律不回写；
+     · 关闭时用 pagehide/visibilitychange 兜底保存（部分 WebView 不触发 beforeunload）。 */
 function _scrollMap() {
   try { return JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}"); }
   catch { return {}; }
 }
-function saveScroll() {
-  if (activeFolderId == null) return;
-  try {
-    const map = _scrollMap();
-    map[String(activeFolderId)] = { x: canvas.scrollLeft, y: canvas.scrollTop };
-    localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
-  } catch {}
+let _restoreTargetX = 0;
+let _restoreTargetY = 0;
+let _restoreActive = false;    // 恢复进行中（尚未到达目标）
+let _restoreLockUntil = 0;     // 该时间戳之前到来的 scroll 事件不回写
+
+function _applyRestoreTarget() {
+  if (!_restoreActive || activeFolderId == null) return;
+  if (!canvas.clientHeight) return;                     // 布局未就绪，等下次重试
+  const max = Math.max(0, canvas.scrollHeight - canvas.clientHeight);
+  canvas.scrollLeft = _restoreTargetX;
+  canvas.scrollTop = Math.min(_restoreTargetY, max);
+  if (max + 1 >= _restoreTargetY) _endRestore();         // 内容已能容纳目标 → 完成
+}
+function _endRestore() {
+  _restoreActive = false;
+  _restoreLockUntil = Date.now() + 400;                  // 收敛后再放行回写
 }
 function restoreScroll() {
   if (activeFolderId == null) return;
+  let s;
+  try { s = _scrollMap()[String(activeFolderId)] || { x: 0, y: 0 }; }
+  catch { s = { x: 0, y: 0 }; }
+  _restoreTargetX = s.x || 0;
+  _restoreTargetY = s.y || 0;
+  _restoreActive = true;
+  _restoreLockUntil = Date.now() + 1200;
+  _applyRestoreTarget();
+  // 数据/布局可能分帧就绪：多帧 + 若干短延时重试，让晚到的内容高度也能承载目标
+  requestAnimationFrame(() => {
+    _applyRestoreTarget();
+    requestAnimationFrame(() => {
+      _applyRestoreTarget();
+      setTimeout(_applyRestoreTarget, 80);
+      setTimeout(_applyRestoreTarget, 240);
+      setTimeout(() => { _applyRestoreTarget(); if (_restoreActive) _endRestore(); }, 600);
+    });
+  });
+}
+function saveScroll(force) {
+  if (activeFolderId == null) return;
+  // 恢复期间浏览器 clamp 产生的 scroll 是「假位置」，不能覆盖真实记忆；
+  // force=true（切夹/页面隐藏/卸载）表示必须记录当前真实位置，仍允许写入。
+  if (!force && (_restoreActive || Date.now() < _restoreLockUntil)) return;
   try {
     const map = _scrollMap();
-    const s = map[String(activeFolderId)] || { x: 0, y: 0 };
-    canvas.scrollLeft = s.x || 0;
-    canvas.scrollTop = s.y || 0;
-  } catch {
-    canvas.scrollLeft = 0; canvas.scrollTop = 0;
-  }
+    // 恢复尚未完成时，当前 scrollTop 可能是被 clamp 的假值，改用「目标值」落库
+    const x = _restoreActive ? _restoreTargetX : canvas.scrollLeft;
+    const y = _restoreActive ? _restoreTargetY : canvas.scrollTop;
+    map[String(activeFolderId)] = { x, y };
+    localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
+  } catch {}
 }
 canvas.addEventListener("scroll", () => {
+  // 恢复期的程序化滚动不参与保存，也不触发「向上加载更多」
+  if (_restoreActive || Date.now() < _restoreLockUntil) return;
   clearTimeout(canvas._t);
   canvas._t = setTimeout(saveScroll, 200);
   // 已完成区分页：滚到画布顶部时若还有历史隐藏，自动追加一批。
@@ -3307,7 +3355,9 @@ async function selectFolder(id) {
   // 必须先保存当前文件夹的滚动位置，再切换 activeFolderId。
   // saveScroll 内部用 activeFolderId 作为 key，顺序颠倒会把旧文件夹的位置
   // 覆盖写到新文件夹的记录里，导致切过去仍停在旧文件夹的位置。
-  saveScroll();
+  // 传 force=true：切夹是「离开当前夹」的确定性动作，必须落库，
+  // 不能被滚动恢复期的回写抑制挡掉（否则快速切夹会丢掉上一夹的位置）。
+  saveScroll(true);
   activeFolderId = id;
   // 每个文件夹独立记忆「靠左对齐」开关，切夹时按新夹的偏好恢复；
   // 不再强制关掉——否则勾选对齐后随便切一下文件夹，对齐就失效了。
@@ -3597,8 +3647,11 @@ async function boot() {
   if (isTauri() && localStorage.getItem(UPDATE_AUTO_KEY) !== "0") {
     setTimeout(() => checkForUpdates(true), 1500);
   }
-  // 窗口关闭前保存滚动位置
-  window.addEventListener("beforeunload", saveScroll);
+  // 关闭/隐藏前保存滚动位置。部分 WebView（Tauri/WebView2）在窗口关闭时不触发
+  // beforeunload，故同时用 pagehide / visibilitychange 兜底，避免丢失最后位置。
+  window.addEventListener("beforeunload", () => saveScroll(true));
+  window.addEventListener("pagehide", () => saveScroll(true));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) saveScroll(true); });
 }
 boot();
 

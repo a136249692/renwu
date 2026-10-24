@@ -1544,23 +1544,21 @@ mark {
   outline-color: rgba(99, 102, 241, 0.85);
 }
 .card-img-wrap {
-  /* flex:1 让 wrap 占据除 caption 外的所有剩余空间，
-     不再写死 aspect-ratio: 1/1，否则 se/s 手柄拖小时高度分配会被撑回 1:1 导致视觉不缩小 */
-  flex: 1 1 auto;
+  /* 高度由 JS 按 it.height（图片区尺寸，不含描述栏）显式下发；
+     卡片总高 = wrap + caption，由内容自动撑开。 */
+  flex: 0 0 auto;
   width: 100%;
   min-height: 8px;
   background: #f1f3f7;
   border-radius: 11px 11px 0 0;
   overflow: hidden;
-  display: grid; place-items: center;
+  display: flex; align-items: center; justify-content: center;
 }
 .card-img {
   /* 用 contain：完整展示原图的长宽，绝不裁切。
-     卡片高度减去 caption（约 30-40px）后 wrap 的纵横比与图片存在偏差，
-     若用 cover 会在 top/bottom 或左右裁掉一圈，用户看不到完整图片。
-     contain 会在 wrap 空余方向留浅灰底，反而更贴合「图片夹」原意——
-     用户粘贴新图片第一眼就能看到全图。极端拖拽时如需精确铺满，可通过
-     手动 resize 调整卡片纵横比让 wrap 与图片比例对齐。 */
+     父级 wrap 拥有明确高度（= 插入时按等比缩放算出的图片高度），
+     因此这里 100%/100% + contain 会把整张图完整铺进图片区，
+     底部描述栏不再占用/遮挡图片内容。 */
   width: 100%;
   height: 100%;
   object-fit: contain;
