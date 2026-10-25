@@ -113,21 +113,28 @@ test("点分组内任意一块 → 选中整组（selectNode 与 downOnNode 都�
   assert.ok(/selectionWithGroup\(n\.id\)/.test(down), "downOnNode 应按分组扩展拖动集合");
 });
 
-test("分组不在画布上画任何框/底色（避免干扰阅读），只保留失效清理", () => {
+test("分组用虚线框 + 浅底色标出范围，并保留失效清理", () => {
   const prune = fnBody("pruneMindGroups");
   assert.ok(/live\.length\s*<\s*2/.test(prune), "成员不足 2 个时清理失效分组");
   assert.ok(/mindGroups\[activeMapId\] = gs/.test(prune) && /persistMindGroups\(\)/.test(prune),
     "剪掉失效成员后应落盘");
   assert.ok(/pruneMindGroups\(\)/.test(fnBody("renderMindCanvas")), "渲染节点后应清理失效分组");
-  assert.ok(!/mind-group-box/.test(MIND), "不应再渲染分组虚线框");
-  assert.ok(!/renderMindGroupBoxes/.test(MIND), "不应保留分组框渲染函数");
+  const render = fnBody("renderMindGroupBoxes");
+  assert.ok(/box\.className = "mind-group-box"/.test(render), "应对每个分组渲染虚线框元素");
+  assert.ok(/minX - 10/.test(render) && /maxX - minX \+ 20/.test(render),
+    "框范围应取成员节点的外接矩形并留内边距");
+  assert.ok(/live\.length < 2/.test(render), "成员不足 2 个的失效分组应清掉");
   const down = MIND.slice(MIND.indexOf("function downOnNode("), MIND.indexOf("\nfunction placeNodeOnTop("));
-  assert.ok(!/mind-group/.test(down), "拖动时不应再做分组框重排");
+  assert.ok(/renderMindGroupBoxes\(\)/.test(down), "拖动时虚线框应跟随");
+  assert.ok(/renderMindGroupBoxes\(\)/.test(fnBody("renderMindCanvas")), "重绘画布时应画出分组框");
 });
 
-test("CSS 不再有分组虚线框/底色样式", () => {
-  assert.ok(!/\.mind-group-box\s*\{/.test(CSS), "应删除 .mind-group-box 虚线样式");
-  assert.ok(!/\.mind-groups\s*\{/.test(CSS), "应删除分组图层样式");
+test("CSS 有分组虚线框/底色样式", () => {
+  assert.ok(/\.mind-group-box\s*\{/.test(CSS), "缺少 .mind-group-box 虚线框样式");
+  assert.ok(/border:\s*2px dashed/.test(CSS), "分组框应为虚线");
+  assert.ok(/background:\s*rgba\(99, 102, 241, 0\.045\)/.test(CSS), "分组框应有浅底色");
+  assert.ok(/pointer-events: none/.test(CSS), "虚线框不应拦截鼠标");
+  assert.ok(/\.mind-groups\s*\{/.test(CSS), "缺少分组图层样式");
 });
 
 // 汇总

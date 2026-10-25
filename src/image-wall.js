@@ -258,6 +258,7 @@ const slideshowCaption= $("slideshow-caption");
 const slideshowPrev   = $("slideshow-prev");
 const slideshowNext   = $("slideshow-next");
 const slideshowClose  = $("slideshow-close");
+const slideshowNextGroup = $("slideshow-next-group");
 const noteFab         = $("image-note-fab");
 const notePanel       = $("image-note-panel");
 const noteCloseBtn    = $("image-note-close");
@@ -460,6 +461,38 @@ function fitView() {
   view.x = (r.width - bw * z) / 2 - minX * z;
   view.y = (r.height - bh * z) / 2 - minY * z;
   applyView(); saveViewSoon();
+}
+/* 把画布视野移到一段世界坐标矩形（大组「下一组」逐组浏览用）。
+   只缩小、不放大：小组保持当前比例，避免来回跳动。 */
+function focusWorldRect(minX, minY, maxX, maxY, pad = 80) {
+  const r = imageCanvas.getBoundingClientRect();
+  const bw = Math.max(1, maxX - minX), bh = Math.max(1, maxY - minY);
+  const fitZoom = clamp(Math.min((r.width - pad * 2) / bw, (r.height - pad * 2) / bh), 0.15, 2);
+  const z = Math.min(view.zoom, fitZoom);
+  view.zoom = z;
+  view.x = r.width / 2 - (minX + bw / 2) * z;
+  view.y = r.height / 2 - (minY + bh / 2) * z;
+  applyView();
+  saveViewSoon();
+}
+/* 「下一组」：按容器内分组的顺序逐个把视野移到该组，走到最后回到第 1 组 */
+function focusNextBigGroup(bg) {
+  const list = (bg.groupIds || [])
+    .map(gid => ({ gid, members: getGroupItemObjects(gid) }))
+    .filter(g => g.members.length > 0);
+  if (!list.length) { toast("这个大组里还没有分组", 2200); return; }
+  const next = (((bg._viewIdx == null ? -1 : bg._viewIdx) + 1) % list.length + list.length) % list.length;
+  bg._viewIdx = next;
+  const members = list[next].members;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const it of members) {
+    const w = it.width || CARD_DEFAULT_W;
+    const h = (it.height || CARD_DEFAULT_W) + BG_CAPTION_H;
+    minX = Math.min(minX, it.x); minY = Math.min(minY, it.y);
+    maxX = Math.max(maxX, it.x + w); maxY = Math.max(maxY, it.y + h);
+  }
+  focusWorldRect(minX - BG_SUB_PAD, minY - BG_SUB_LABEL_H, maxX + BG_SUB_PAD, maxY + BG_SUB_PAD);
+  toast(`组 ${next + 1} / ${list.length} · ${members.length} 张`, 1600);
 }
 
 /* ---------- 卡片渲染 ----------
@@ -891,6 +924,7 @@ function createBigGroupEl(bg) {
         </select>
       </label>
       <span class="big-group-meta"></span>
+      <button class="big-group-next" type="button" title="把视野移到下一个分组（到最后一个后回到第 1 组）">下一组 ▾</button>
       <button class="big-group-del" type="button" title="删除大组（只删容器，图片保留）">×</button>
     </div>
     <div class="big-group-body"></div>
@@ -908,6 +942,7 @@ function bindBigGroupEvents(el, bg) {
   const nameEl = el.querySelector(".big-group-name");
   const renameBtn = el.querySelector(".big-group-rename");
   const colsSel = el.querySelector(".big-group-cols select");
+  const nextBtn = el.querySelector(".big-group-next");
 
   // 拖动标题栏：容器与组内图片整体平移
   head.addEventListener("mousedown", e => {
@@ -994,6 +1029,15 @@ function bindBigGroupEvents(el, bg) {
       persistBigGroups();
       renderBigGroups();
       toast(bg.cols ? `已按 ${bg.cols} 列显示` : "已切换为自适应排列", 1800);
+    });
+  }
+
+  // 下一组：按容器内分组顺序逐个把视野移过去（看完最后一组回到第 1 组）
+  if (nextBtn) {
+    nextBtn.addEventListener("mousedown", e => e.stopPropagation());
+    nextBtn.addEventListener("click", e => {
+      e.stopPropagation();
+      focusNextBigGroup(bg);
     });
   }
 
@@ -1123,9 +1167,18 @@ function bigGroupAtClient(clientX, clientY) {
 let _slideItems = [];
 let _slideIndex = 0;
 let _slideLoadToken = 0;
+let _slideGid = null;      // 当前放映的组 id
+let _slideChain = null;    // 同属一个大组里「有图的分组」id 顺序，用于「下一组」
 
 function slideshowOpen() {
   return !!slideshowEl && !slideshowEl.hidden;
+}
+/* 当前组所在大组里可放映的分组顺序（空组不计入） */
+function slideGroupChain(gid) {
+  const bg = bigGroupForGroup(gid);
+  if (!bg) return null;
+  const gids = (bg.groupIds || []).filter(g => getGroupItemObjects(g).length > 0);
+  return gids.length > 1 ? gids : null;
 }
 function openSlideshow(gid) {
   const members = getGroupItemObjects(gid).slice();
@@ -1134,11 +1187,30 @@ function openSlideshow(gid) {
   members.sort((a, b) => (a.y - b.y) || (a.x - b.x));
   const bg = bigGroupForGroup(gid);
   const idx = bg ? (bg.groupIds || []).indexOf(gid) : -1;
+  _slideGid = gid;
+  _slideChain = slideGroupChain(gid);
   _slideItems = members;
   _slideIndex = 0;
-  if (slideshowTitle) slideshowTitle.textContent = `组 ${idx >= 0 ? idx + 1 : 1} · ${members.length} 张`;
+  if (slideshowTitle) {
+    slideshowTitle.textContent = _slideChain
+      ? `组 ${_slideChain.indexOf(gid) + 1} / ${_slideChain.length} · ${members.length} 张`
+      : `组 ${idx >= 0 ? idx + 1 : 1} · ${members.length} 张`;
+  }
+  // 「下一组」只在同属一个大组、且还有别的分组时才出现
+  if (slideshowNextGroup) slideshowNextGroup.hidden = !_slideChain;
   if (slideshowEl) slideshowEl.hidden = false;
   showSlide(0);
+}
+/* 放映中继续看下一个分组：走到最后一个分组后回到第 1 组 */
+function slideshowGotoNextGroup() {
+  if (!_slideGid || !_slideChain || !_slideChain.length) return false;
+  const i = _slideChain.indexOf(_slideGid);
+  const nextIdx = (Math.max(i, 0) + 1) % _slideChain.length;
+  const next = _slideChain[nextIdx];
+  const total = _slideChain.length;
+  openSlideshow(next);
+  toast(`组 ${nextIdx + 1} / ${total}`, 1400);
+  return true;
 }
 function showSlide(i) {
   if (!_slideItems.length || !slideshowImg) return;
@@ -1161,6 +1233,8 @@ function closeSlideshow() {
   slideshowEl.hidden = true;
   _slideItems = [];
   _slideIndex = 0;
+  _slideGid = null;
+  _slideChain = null;
   _slideLoadToken++;
   if (slideshowImg) slideshowImg.removeAttribute("src");
 }
@@ -1168,6 +1242,9 @@ function bindSlideshow() {
   if (!slideshowEl) return;
   if (slideshowPrev) slideshowPrev.addEventListener("click", () => showSlide(_slideIndex - 1));
   if (slideshowNext) slideshowNext.addEventListener("click", () => showSlide(_slideIndex + 1));
+  if (slideshowNextGroup) {
+    slideshowNextGroup.addEventListener("click", e => { e.stopPropagation(); slideshowGotoNextGroup(); });
+  }
   if (slideshowBackdrop) slideshowBackdrop.addEventListener("click", closeSlideshow);
   if (slideshowClose) slideshowClose.addEventListener("click", closeSlideshow);
   document.addEventListener("keydown", e => {
@@ -1175,6 +1252,8 @@ function bindSlideshow() {
     if (e.key === "Escape") { e.preventDefault(); closeSlideshow(); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); showSlide(_slideIndex - 1); }
     else if (e.key === "ArrowRight") { e.preventDefault(); showSlide(_slideIndex + 1); }
+    // 看得完这一组还想接着看：N 直接跳到下一个分组，不用退出放映
+    else if (e.key === "n" || e.key === "N") { e.preventDefault(); slideshowGotoNextGroup(); }
   });
 }
 

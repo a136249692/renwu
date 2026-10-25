@@ -129,6 +129,10 @@ const mindCanvas = $("mind-canvas");
 const mindWorld = $("mind-world");
 const mindEdgesSvg = $("mind-edges");
 const mindNodesWrap = $("mind-nodes");
+// 分组虚线框层：放在节点层之下，只标出分组范围，不拦截鼠标事件
+const mindGroupLayer = document.createElement("div");
+mindGroupLayer.className = "mind-groups";
+const mindGroupBoxEls = new Map();   // gid -> box el
 const mindEmpty = $("mind-empty");
 const mindImageInput = $("mind-image-input");
 const mindLightbox = $("mind-lightbox");
@@ -871,12 +875,14 @@ function renderMindCanvas() {
   // 节点
   nodeEls.clear();
   mindNodesWrap.innerHTML = "";
+  mindNodesWrap.appendChild(mindGroupLayer);   // 重挂分组框层（innerHTML 清空会把它摘掉），保持在节点之下
   for (const n of nodes) {
     const el = makeNodeEl(n);
     mindNodesWrap.appendChild(el);
   }
   renderEdges();
   pruneMindGroups();
+  renderMindGroupBoxes();
   // 空状态提示
   if (nodes.length === 0) {
     mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>按住 <kbd>Ctrl/⌘</kbd> 点选多个思维块后，点工具栏「📦 分组」可打包成一组：之后点组内任一块整组选中、一起拖动<br/>节点内不再常驻「＋ 图片」按钮，选中节点后点工具栏「🖼 上传图片」即可加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
@@ -959,7 +965,7 @@ function renderNodeImages(n, el) {
     cnt.className = "cover-count";
     cnt.textContent = String(list.length);
     cover.appendChild(cnt);
-    const doExpand = e => { e.stopPropagation(); expandedImgs.add(n.id); renderNodeImages(n, el); renderEdges(); };
+    const doExpand = e => { e.stopPropagation(); expandedImgs.add(n.id); renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); };
     cover.addEventListener("click", doExpand);
     wrap.appendChild(cover);
 
@@ -1014,7 +1020,7 @@ function renderNodeImages(n, el) {
   const toggle = document.createElement("button");
   toggle.className = "mind-node-img-toggle";
   toggle.textContent = "收起 ▾";
-  toggle.addEventListener("click", e => { e.stopPropagation(); expandedImgs.delete(n.id); renderNodeImages(n, el); renderEdges(); });
+  toggle.addEventListener("click", e => { e.stopPropagation(); expandedImgs.delete(n.id); renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); });
   wrap.appendChild(toggle);
   appendNodeImgBar(wrap, n.id);
 }
@@ -1120,7 +1126,7 @@ async function addImagesToNode(nodeId, files) {
   const n = nodes.find(x => x.id === nodeId);
   const el = nodeEls.get(nodeId);
   expandedImgs.add(nodeId);   // 添加后自动展开，便于立刻看到刚加的图
-  if (n && el) { renderNodeImages(n, el); renderEdges(); }
+  if (n && el) { renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); }
   toast(`已添加 ${ok} 张图片`);
   return ok;
 }
@@ -1135,7 +1141,7 @@ async function removeNodeImage(n, im) {
   nodeImages.set(n.id, list.filter(x => x.id !== im.id));
   releaseImgUrl(im.file_path);
   const el = nodeEls.get(n.id);
-  if (el) { renderNodeImages(n, el); renderEdges(); }
+  if (el) { renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); }
   toast("已移除图片", 2000);
 }
 
@@ -1482,8 +1488,49 @@ function selectionWithGroup(nodeId) {
   const members = gid ? groupNodeIds(gid) : [];
   return new Set(members.length >= 2 ? members : [nodeId]);
 }
-/* 清理失效分组：成员节点被删除后同步裁剪，少于 2 个的分组直接丢弃。
-   分组本身不在画布上画任何框/底色（避免干扰阅读），只在选中与拖动时体现整组语义。 */
+/* 用一圈虚线框 + 浅底色标出每个分组的范围（节点层之下，不挡点击）。
+   顺带清理失效分组：成员节点被删除后同步裁剪，少于 2 个直接丢弃。 */
+function renderMindGroupBoxes() {
+  if (!mindGroupLayer) return;
+  const gs = mapGroups();
+  const keep = new Set();
+  let changed = false;
+  for (const [gid, ids] of Object.entries(gs)) {
+    if (!Array.isArray(ids)) { delete gs[gid]; changed = true; continue; }
+    const live = ids.filter(id => nodes.some(n => n.id === id));
+    if (live.length !== ids.length) { gs[gid] = live; changed = true; }
+    if (live.length < 2) { delete gs[gid]; changed = true; continue; }
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const id of live) {
+      const n = nodes.find(x => x.id === id);
+      if (!n) continue;
+      const el = nodeEls.get(id);
+      const h = el ? el.offsetHeight : 70;
+      minX = Math.min(minX, n.x); minY = Math.min(minY, n.y);
+      maxX = Math.max(maxX, n.x + nodeWidth(n)); maxY = Math.max(maxY, n.y + h);
+    }
+    let box = mindGroupBoxEls.get(gid);
+    if (!box) {
+      box = document.createElement("div");
+      box.className = "mind-group-box";
+      mindGroupLayer.appendChild(box);
+      mindGroupBoxEls.set(gid, box);
+    }
+    box.style.left = (minX - 10) + "px";
+    box.style.top = (minY - 12) + "px";
+    box.style.width = (maxX - minX + 20) + "px";
+    box.style.height = (maxY - minY + 24) + "px";
+    keep.add(gid);
+  }
+  for (const [gid, box] of mindGroupBoxEls) {
+    if (!keep.has(gid)) { box.remove(); mindGroupBoxEls.delete(gid); }
+  }
+  if (changed && activeMapId != null) {
+    mindGroups[activeMapId] = gs;
+    persistMindGroups();
+  }
+}
+/* 清理失效分组：成员节点被删除后同步裁剪，少于 2 个的分组直接丢弃。 */
 function pruneMindGroups() {
   if (!activeMapId) return;
   const gs = mapGroups();
@@ -1514,6 +1561,7 @@ function createMindGroup() {
   gs[gid] = ids.slice();
   mindGroups[activeMapId] = gs;
   persistMindGroups();
+  renderMindGroupBoxes();
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
   toast(`已把 ${ids.length} 个思维块打包成一组：点其中任意一块可整组选中并一起拖动`, 3800);
 }
@@ -1531,6 +1579,7 @@ function ungroupMindSelection() {
   if (!removed) { toast("选中的思维块不在任何分组里", 2600); return; }
   mindGroups[activeMapId] = gs;
   persistMindGroups();
+  renderMindGroupBoxes();
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
   toast("已解散分组", 2000);
 }
@@ -1738,6 +1787,7 @@ function downOnNode(e, el, n) {
     }
     placeNodeOnTop(el, n);
     renderEdges();
+    renderMindGroupBoxes();   // 拖动时虚框跟着节点走
   };
   const onUp = async () => {
     window.removeEventListener("pointermove", onMove);
@@ -1756,6 +1806,7 @@ function downOnNode(e, el, n) {
       }
       await Promise.all(tasks);
       renderEdges();
+      renderMindGroupBoxes();
     } else if (isCtrl) {
       // Ctrl/⌘+点（无拖动）：切换当前节点的选中态——按下时先「加入」，此处再根据按下前状态还原
       if (wasSelectedBefore) selectedNodeIds.delete(n.id);
