@@ -1105,7 +1105,6 @@ function reorderFolders(srcId, targetId) {
 }
 
 let _folderRenaming = false;   // 内联重命名期间：阻止 pointerdown 触发拖拽
-function finalizeFolderRename() { _folderRenaming = false; }
 /* 任务夹内联重命名：新建任务夹、双击任务夹改名都走这里。
    与思维夹 startRenameMap 保持一致的交互体验：
      · 立即把 .name 换成 <input>，无需弹窗
@@ -2838,17 +2837,7 @@ async function restoreFromMirror() {
   } catch (e) { console.error("[玻光画布] 恢复镜像失败", e); }
 }
 
-/* ---------- 弹窗 ---------- */
-const modal = $("modal");
-const nameInput = $("folder-name-input");
-let modalMode = "create", modalTargetId = null;
-function openModal(mode, folder) {
-  modalMode = mode; modalTargetId = folder ? folder.id : null;
-  $("modal-title").textContent = mode === "rename" ? "重命名任务夹" : "新建任务夹";
-  nameInput.value = folder ? folder.name : "";
-  modal.hidden = false; setTimeout(() => nameInput.focus(), 30);
-}
-function closeModal() { modal.hidden = true; }
+/* ---------- 新建任务夹：直接创建 + 立刻内联改名，不再弹对话框 ---------- */
 $("new-folder-btn").addEventListener("click", async () => {
   // 与思维夹「新建导图」一致：直接创建 + 立刻内联改名，不再弹对话框
   const f = await api.createFolder("");
@@ -2858,22 +2847,6 @@ $("new-folder-btn").addEventListener("click", async () => {
   const li = folderListEl.querySelector(`.folder-item[data-id="${f.id}"]`);
   if (li) startFolderRename(li, f);
 });
-$("modal-cancel").addEventListener("click", closeModal);
-modal.addEventListener("click", e => { if (e.target === modal) closeModal(); });
-$("modal-ok").addEventListener("click", async () => {
-  const name = nameInput.value.trim();
-  if (!name) { nameInput.focus(); return; }
-  if (modalMode === "create") {
-    const f = await api.createFolder(name);
-    folders.push(f); activeFolderId = f.id;
-  } else if (modalMode === "rename" && modalTargetId) {
-    await api.renameFolder(modalTargetId, name);
-    const f = folders.find(x => x.id === modalTargetId);
-    if (f) f.name = name;
-  }
-  closeModal(); await reloadFolders(); await reloadTasks(); renderAll();
-});
-nameInput.addEventListener("keydown", e => { if (e.key === "Enter") $("modal-ok").click(); });
 
 /* ---------- ALT 键：图片夹卡片右上角工具栏默认隐藏，按住 ALT 才显示 ---------- */
 // 与 body.show-card-actions 的"body class + 后代选择器控制 opacity"模式一致；

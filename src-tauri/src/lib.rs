@@ -495,9 +495,10 @@ fn update_image_item(
     width: f64,
     height: f64,
     title: String,
+    z: i64,
 ) -> Result<(), String> {
     let conn = state.conn.lock().map_err(|_| "数据库忙".to_string())?;
-    db::update_image_item(&conn, id, x, y, width, height, &title)
+    db::update_image_item(&conn, id, x, y, width, height, &title, z)
 }
 
 #[tauri::command]

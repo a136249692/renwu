@@ -167,6 +167,7 @@ let connectingPort = null;   // { node, x, y } 连线起点
 let tempEdgeEl = null;       // 临时连线 <path>
 let drag = null;               // 当前拖拽/平移会话
 let _viewTimer = null;         // 视野防抖保存定时器
+let _activeMapToken = 0;       // setActiveMap 异步竞态守卫：快速切换导图时只认最后一次
 
 /* 节点图片状态 */
 const nodeImages = new Map();  // nodeId -> [{ id, node_id, file_name, file_path }]
@@ -814,11 +815,19 @@ async function setActiveMap(id) {
     return;
   }
   view = { x: activeMap.pan_x != null ? activeMap.pan_x : 40, y: activeMap.pan_y != null ? activeMap.pan_y : 40, zoom: activeMap.zoom || 1 };
+  // 快速连点切换导图时，旧的 apiListNodes 可能晚于新的返回，把旧导图数据盖进新导图。
+  // 自增 token：await 返回后如果不是最新一次切换，直接放弃本次加载。
+  const token = ++_activeMapToken;
   try {
-    nodes = await apiListNodes(id);
-    edges = await apiListEdges(id);
-  } catch { nodes = []; edges = []; }
+    const [n, e] = await Promise.all([apiListNodes(id), apiListEdges(id)]);
+    if (token !== _activeMapToken) return;
+    nodes = n; edges = e;
+  } catch {
+    if (token !== _activeMapToken) return;
+    nodes = []; edges = [];
+  }
   try { loadNodeImages(await apiListMapImages(id)); } catch {}
+  if (token !== _activeMapToken) return;
   renderMindHeader();
   renderMindCanvas();
 }
@@ -1583,6 +1592,40 @@ function ungroupMindSelection() {
   if (typeof syncMindToolbarBtns === "function") syncMindToolbarBtns();
   toast("已解散分组", 2000);
 }
+/* 左右整理：把选中的思维块（分组会自动选中整组）按网格排开，消除重叠。
+ * 与图片夹的左右整理一致：按「上→下、左→右」的阅读顺序排序，
+ * 单元格取选中块的最大宽高，行列间留固定间距。 */
+function tidyMindSelection() {
+  if (!activeMap) return;
+  const sel = [...selectedNodeIds]
+    .map(id => nodes.find(n => n.id === id))
+    .filter(Boolean);
+  if (sel.length < 2) { toast("请至少选中 2 个思维块再整理", 2500); return; }
+  const GAP = 24;
+  const ordered = sel.slice().sort((a, b) => {
+    const dy = a.y - b.y;
+    if (Math.abs(dy) > 40) return dy;
+    return a.x - b.x;
+  });
+  const cellW = Math.max(...sel.map(n => nodeWidth(n)));
+  const cellH = Math.max(...sel.map(n => {
+    const el = nodeEls.get(n.id);
+    return el && el.offsetHeight ? el.offsetHeight : 70;
+  }));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(ordered.length)));
+  const minX = Math.min(...sel.map(n => n.x));
+  const minY = Math.min(...sel.map(n => n.y));
+  ordered.forEach((n, i) => {
+    n.x = Math.round(minX + (i % cols) * (cellW + GAP));
+    n.y = Math.round(minY + Math.floor(i / cols) * (cellH + GAP));
+    const el = nodeEls.get(n.id);
+    if (el) { el.style.left = n.x + "px"; el.style.top = n.y + "px"; }
+    apiUpdateNodePos(n.id, n.x, n.y);
+  });
+  renderEdges();
+  renderMindGroupBoxes();
+  toast(`已左右整理 ${sel.length} 个思维块（${cols} 列，无重叠）`, 2200);
+}
 /* 把「.selected」class 刷到所有节点上，与 selectedNodeIds 集合保持同步。 */
 function applyNodeSelectionClasses() {
   for (const [nid, el] of nodeEls) {
@@ -2094,6 +2137,7 @@ const mindPasteBlockBtn = $("mind-paste-block");
 const mindAddImgBtn = $("mind-add-img");
 const mindGroupBtn = $("mind-group");
 const mindUngroupBtn = $("mind-ungroup");
+const mindTidyBtn = $("mind-tidy");
 function syncMindToolbarBtns() {
   if (mindCopyBlockBtn) {
     const show = !!(activeMap && selectedNodeId != null);
@@ -2115,6 +2159,10 @@ function syncMindToolbarBtns() {
     // 只要选中集合里有属于分组的块，就允许解散
     const anyGrouped = !!(activeMap && [...selectedNodeIds].some(id => groupOfNode(id)));
     mindUngroupBtn.hidden = !anyGrouped;
+  }
+  if (mindTidyBtn) {
+    // 选中整组（点组内任意一块即整组选中）或手动多选 2 个以上时可整理
+    mindTidyBtn.hidden = !(activeMap && selectedNodeIds.size >= 2);
   }
 }
 function bindToolbar() {
@@ -2138,6 +2186,7 @@ function bindToolbar() {
   });
   if (mindGroupBtn) mindGroupBtn.addEventListener("click", () => createMindGroup());
   if (mindUngroupBtn) mindUngroupBtn.addEventListener("click", () => ungroupMindSelection());
+  if (mindTidyBtn) mindTidyBtn.addEventListener("click", () => tidyMindSelection());
 }
 /* 确认弹窗：确定/取消按钮 + 点击遮罩关闭 + Enter/Escape 快捷键。
    事件在 init 里注册一次，全局复用；askConfirm 每次只显示/隐藏。 */

@@ -65,7 +65,9 @@ test("大组按图片夹分开持久化到 localStorage", () => {
 
 test("切换图片夹时在图片就绪后再加载大组（避免误清理组）", () => {
   const body = fnBody("setActiveFolder");
-  const loadItems = body.indexOf("items = await apiListItems");
+  // 兼容两种写法：旧的 `items = await apiListItems` 与带竞态守卫的
+  // `const loaded = await apiListItems(...); ...; items = loaded`
+  const loadItems = body.search(/items = (await apiListItems|loaded)/);
   const loadBig = body.indexOf("loadBigGroupsForFolder");
   assert.ok(loadItems > 0 && loadBig > loadItems,
     "loadBigGroupsForFolder 必须在 items 加载之后调用（prune 依赖当前夹图片）");
@@ -337,24 +339,65 @@ test("「下一组」按钮与 N 键都已绑定", () => {
     "「下一组」在 pointer-events:none 的头部里要单独恢复点击");
 });
 
-// ---------- 逐组浏览 ----------
-
-test("大组标题栏提供「下一组」按钮", () => {
-  const body = fnBody("createBigGroupEl");
-  assert.ok(/class="big-group-next"/.test(body), "标题栏应有 .big-group-next 按钮");
-  assert.ok(/下一组 ▾/.test(body), "按钮文案应为「下一组」");
-  const css = cssBlock(".big-group-next");
-  assert.ok(/white-space:\s*nowrap/.test(css), "按钮文案不换行");
+test("放映时滚轮以鼠标位置为中心缩放图片", () => {
+  assert.ok(/id="slideshow-stage"/.test(HTML), "舞台需要 id 以计算缩放中心");
+  const body = fnBody("bindSlideshow");
+  assert.ok(/slideshowEl\.addEventListener\("wheel"[\s\S]{0,220}?e\.preventDefault\(\)[\s\S]{0,140}?slideZoomAt\(e\.clientX, e\.clientY/.
+    test(body), "滚轮应阻止页面滚动并按鼠标位置缩放");
+  assert.ok(/\{ passive: false \}/.test(body), "wheel 必须 passive:false 才能 preventDefault");
+  const zoom = fnBody("slideZoomAt");
+  assert.ok(/Math\.max\(SLIDE_ZOOM_MIN, Math\.min\(SLIDE_ZOOM_MAX, z0 \* factor\)\)/.test(zoom),
+    "缩放倍率应限制在 1x~8x");
+  assert.ok(/const k = z1 \/ z0/.test(zoom) && /dx - k \* \(dx - _slidePanX\)/.test(zoom),
+    "应按鼠标相对图片中心的位置补偿位移");
+  const apply = fnBody("applySlideZoom");
+  assert.ok(/translate\(\$\{_slidePanX\}px, \$\{_slidePanY\}px\) scale\(\$\{_slideZoom\}\)/.test(apply),
+    "应同时应用平移与缩放");
 });
 
-test("「下一组」按容器内分组顺序循环移视野，并提示组序号", () => {
-  const body = fnBody("focusNextBigGroup");
+test("换图/关闭/缩小到 1x 都会重置缩放；放大后可拖动平移", () => {
+  assert.ok(/resetSlideZoom\(\)/.test(fnBody("showSlide")), "切换图片应回到原始大小");
+  assert.ok(/resetSlideZoom\(\)/.test(fnBody("closeSlideshow")), "关闭放映应清空缩放");
+  const body = fnBody("bindSlideshow");
+  assert.ok(/slideshowImg\.addEventListener\("pointerdown"[\s\S]{0,200}?_slideZoom <= 1/.test(body),
+    "只有放大后才允许拖动");
+  assert.ok(/slideshowImg\.setPointerCapture\(e\.pointerId\)/.test(body), "拖动应捕获指针");
+  assert.ok(/clampSlidePan\(\)/.test(body), "拖动应限制在图片范围内");
+  const css = cssBlock(".slide-img");
+  assert.ok(/transform-origin:\s*50% 50%/.test(css), "缩放以图片中心为基准");
+  assert.ok(/will-change:\s*transform/.test(css), "缩放应避免重排");
+  assert.ok(/cursor:\s*grab/.test(cssBlock(".slide-img.is-zoomed")), "放大后应提示可拖动");
+  assert.ok(/overflow:\s*hidden/.test(cssBlock(".slide-stage {")), "放大后不应盖住标题栏");
+});
+
+
+// ---------- 逐组浏览 ----------
+
+test("大组标题栏提供「上一组 / 下一组」按钮", () => {
+  const body = fnBody("createBigGroupEl");
+  assert.ok(/class="big-group-prev"/.test(body), "标题栏应有 .big-group-prev 按钮");
+  assert.ok(/上一组 ▴/.test(body), "按钮文案应为「上一组」");
+  assert.ok(/class="big-group-next"/.test(body), "标题栏应有 .big-group-next 按钮");
+  assert.ok(/下一组 ▾/.test(body), "按钮文案应为「下一组」");
+  assert.ok(/white-space:\s*nowrap/.test(cssBlock(".big-group-prev")), "上一组文案不换行");
+  assert.ok(/white-space:\s*nowrap/.test(cssBlock(".big-group-next")), "下一组文案不换行");
+});
+
+test("「上一组 / 下一组」按容器内分组顺序循环移视野，并提示组序号", () => {
+  const body = fnBody("focusBigGroupBy");
   assert.ok(/const list = \(bg\.groupIds \|\| \[\]\)/.test(body), "应遍历容器内分组");
   assert.ok(/\.filter\(g => g\.members\.length > 0\)/.test(body), "空分组应跳过");
-  assert.ok(/% list\.length/.test(body), "到最后一组后应回到第 1 组（循环）");
+  assert.ok(/const next = \(\(cur \+ step\) % list\.length \+ list\.length\) % list\.length/.test(body),
+    "按 step 前进/后退，并在首尾之间循环");
   assert.ok(/bg\._viewIdx = next/.test(body), "应记录当前浏览到的组");
   assert.ok(/focusWorldRect\(/.test(body), "应把视野移到该组范围");
   assert.ok(/组 \$\{next \+ 1\} \/ \$\{list\.length\}/.test(body), "提示应显示当前组/总组数");
+  assert.ok(/function focusNextBigGroup\(bg\) \{ focusBigGroupBy\(bg, 1\); \}/.test(JS_CODE),
+    "下一组应正向步进");
+  assert.ok(/function focusPrevBigGroup\(bg\) \{ focusBigGroupBy\(bg, -1\); \}/.test(JS_CODE),
+    "上一组应反向步进");
+  assert.ok(/bg\._viewIdx == null \? \(step > 0 \? -1 : 0\) : bg\._viewIdx/.test(body),
+    "未浏览过时：下一组从第 1 组开始，上一组从最后一组开始");
 });
 
 test("视野移动到指定矩形：居中并只缩小不放大", () => {
@@ -365,11 +408,14 @@ test("视野移动到指定矩形：居中并只缩小不放大", () => {
   assert.ok(/applyView\(\)/.test(body) && /saveViewSoon\(\)/.test(body), "应应用并保存视图");
 });
 
-test("点击「下一组」不会触发标题栏拖动", () => {
+test("点击「上一组 / 下一组」不会触发标题栏拖动", () => {
   const body = fnBody("bindBigGroupEvents");
-  const seg = body.slice(body.indexOf('nextBtn.addEventListener("mousedown"'));
-  assert.ok(/e\.stopPropagation\(\)/.test(seg.slice(0, 80)), "mousedown 应阻止冒泡，避免拖动容器");
-  assert.ok(/focusNextBigGroup\(bg\)/.test(seg), "点击应调用 focusNextBigGroup");
+  const nextSeg = body.slice(body.indexOf('nextBtn.addEventListener("mousedown"'));
+  assert.ok(/e\.stopPropagation\(\)/.test(nextSeg.slice(0, 80)), "下一组 mousedown 应阻止冒泡，避免拖动容器");
+  assert.ok(/focusNextBigGroup\(bg\)/.test(nextSeg), "点击应调用 focusNextBigGroup");
+  const prevSeg = body.slice(body.indexOf('prevBtn.addEventListener("mousedown"'));
+  assert.ok(/e\.stopPropagation\(\)/.test(prevSeg.slice(0, 80)), "上一组 mousedown 应阻止冒泡，避免拖动容器");
+  assert.ok(/focusPrevBigGroup\(bg\)/.test(prevSeg), "点击应调用 focusPrevBigGroup");
 });
 
 // ---------- 输出 ----------

@@ -86,13 +86,21 @@ function groupForItem(id) {
 function getGroupMembers(groupId) {
   const m = groups[groupId];
   if (!m) return [];
-  return m.filter(id => items.some(it => it.id === id));
+  // 单次遍历建索引替代嵌套 some/find（原来是 O(组员数×图片数)）
+  const byId = new Map(items.map(it => [it.id, it]));
+  return m.filter(id => byId.has(id));
 }
 // 大组/幻灯片需要按组拿「图片对象」而不是 id
 function getGroupItemObjects(groupId) {
-  return getGroupMembers(groupId)
-    .map(id => items.find(it => it.id === id))
-    .filter(Boolean);
+  const m = groups[groupId];
+  if (!m) return [];
+  const byId = new Map(items.map(it => [it.id, it]));
+  const out = [];
+  for (const id of m) {
+    const it = byId.get(id);
+    if (it) out.push(it);
+  }
+  return out;
 }
 
 /* ---------- 大组（Big Group / 分组集合容器） ----------
@@ -122,7 +130,15 @@ function lsLoadBigGroupsMap() {
 }
 function persistBigGroups() {
   if (activeFolderId == null) return;
-  bigGroupsMap[String(activeFolderId)] = bigGroups;
+  // 剔除 _viewIdx 这类以下划线开头的临时字段（运行时浏览进度），
+  // 只落库纯数据，避免重启后 JSON 里残留无意义的会话状态。
+  bigGroupsMap[String(activeFolderId)] = bigGroups.map(bg => {
+    const plain = {};
+    for (const k of Object.keys(bg)) {
+      if (!k.startsWith("_")) plain[k] = bg[k];
+    }
+    return plain;
+  });
   try { localStorage.setItem(BIG_GROUPS_KEY, JSON.stringify(bigGroupsMap)); } catch {}
 }
 function loadBigGroupsForFolder(folderId) {
@@ -254,6 +270,7 @@ const slideshowBackdrop = $("slideshow-backdrop");
 const slideshowTitle  = $("slideshow-title");
 const slideshowCounter= $("slideshow-counter");
 const slideshowImg    = $("slideshow-img");
+const slideshowStage  = $("slideshow-stage");
 const slideshowCaption= $("slideshow-caption");
 const slideshowPrev   = $("slideshow-prev");
 const slideshowNext   = $("slideshow-next");
@@ -277,6 +294,7 @@ let view = { x: 40, y: 40, zoom: 1 };
 const itemEls = new Map(); // itemId -> DOM el
 let selection = new Set(); // 选中的 itemId
 let zTop = 100;
+let _activeFolderToken = 0; // setActiveFolder 异步竞态守卫：快速切换夹时只认最后一次
 let drag = null;          // 拖拽/平移会话
 let _viewTimer = null;
 let _itemSaveTimers = new Map(); // itemId -> 保存防抖定时器
@@ -383,17 +401,20 @@ async function apiSaveImage(folderId, fileName, title, data) {
   }
   return item;
 }
-async function apiUpdateItem(id, x, y, width, height, title) {
+async function apiUpdateItem(id, x, y, width, height, title, z) {
   if (isTauri()) {
-    await mi("update_image_item", { id, x, y, width, height, title });
+    await mi("update_image_item", { id, x, y, width, height, title, z: z || 0 });
   }
   const it = lsItems.find(x => x.id === id);
-  if (it) { it.x = x; it.y = y; it.width = width; it.height = height; it.title = title; lsSaveItems(lsItems); }
+  if (it) { it.x = x; it.y = y; it.width = width; it.height = height; it.title = title; it.z = z || 0; lsSaveItems(lsItems); }
 }
 async function apiDeleteItem(id) {
   if (isTauri()) {
     await mi("delete_image_item", { id });
   }
+  // 释放该图缓存的 blob URL（文件已删，留着只会泄漏内存）
+  const cur = items.find(x => x.id === id);
+  if (cur) releaseImgUrl(cur.folder_id ?? activeFolderId, cur.file_path);
   const it = lsItems.find(x => x.id === id);
   if (it) {
     try { localStorage.removeItem(`glassCanvas.img.${it.folder_id}.${it.file_name}`); } catch {}
@@ -402,11 +423,25 @@ async function apiDeleteItem(id) {
 }
 async function apiReadImageFile(folderId, filePath) {
   if (isTauri()) {
-    const bytes = await mi("read_image_file", { folderId, filePath });
-    if (!bytes) return null;
-    const u8 = new Uint8Array(bytes);
-    const mime = guessMime(filePath);
-    return URL.createObjectURL(new Blob([u8], { type: mime }));
+    // blob URL 缓存：同一张图只 createObjectURL 一次，
+    // 卡片渲染/幻灯片翻页/灯箱全部复用；切夹或删除图片时统一 revoke。
+    // 之前每次调用都新建且从不 revoke，反复翻页会持续泄漏内存。
+    const key = `${folderId}/${filePath}`;
+    if (imgUrlCache.has(key)) return imgUrlCache.get(key);
+    if (imgUrlPending.has(key)) return imgUrlPending.get(key);
+    const gen = _imgUrlGen;
+    const p = (async () => {
+      const bytes = await mi("read_image_file", { folderId, filePath });
+      if (!bytes) return null;
+      const u8 = new Uint8Array(bytes);
+      const url = URL.createObjectURL(new Blob([u8], { type: guessMime(filePath) }));
+      if (gen === _imgUrlGen) imgUrlCache.set(key, url);
+      else { try { URL.revokeObjectURL(url); } catch {} } // 期间已切夹，直接回收
+      return url;
+    })();
+    imgUrlPending.set(key, p);
+    p.catch(() => {}).finally(() => { imgUrlPending.delete(key); });
+    return p;
   }
   // 浏览器兜底：直接读回 dataURL
   try {
@@ -417,6 +452,27 @@ async function apiReadImageFile(folderId, filePath) {
 function guessMime(p) {
   const ext = (p.split(".").pop() || "").toLowerCase();
   return ({ png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp", avif: "image/avif" }[ext]) || "application/octet-stream";
+}
+/* blob URL 缓存的簿记：gen 代际号防止「释放后又写入」的孤儿缓存 */
+const imgUrlCache = new Map();     // `${folderId}/${filePath}` -> blob url
+const imgUrlPending = new Map();  // 同 key -> 正在进行的读取 Promise（并发去重）
+let _imgUrlGen = 0;
+function releaseImgUrl(folderId, filePath) {
+  const key = `${folderId}/${filePath}`;
+  const url = imgUrlCache.get(key);
+  if (url != null) {
+    try { URL.revokeObjectURL(url); } catch {}
+    imgUrlCache.delete(key);
+  }
+  imgUrlPending.delete(key);
+}
+function releaseImgUrlsAll() {
+  _imgUrlGen++;
+  imgUrlPending.clear();
+  for (const url of imgUrlCache.values()) {
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+  imgUrlCache.clear();
 }
 
 /* ---------- 视图应用（平移/缩放） ---------- */
@@ -439,10 +495,6 @@ function zoomAt(cx, cy, factor) {
   view.zoom = z1;
   applyView();
   saveViewSoon();
-}
-function toWorld(clientX, clientY) {
-  const r = imageCanvas.getBoundingClientRect();
-  return { x: (clientX - r.left - view.x) / view.zoom, y: (clientY - r.top - view.y) / view.zoom };
 }
 function fitView() {
   if (!items.length) { view = { x: 40, y: 40, zoom: 1 }; applyView(); saveViewSoon(); return; }
@@ -475,13 +527,16 @@ function focusWorldRect(minX, minY, maxX, maxY, pad = 80) {
   applyView();
   saveViewSoon();
 }
-/* 「下一组」：按容器内分组的顺序逐个把视野移到该组，走到最后回到第 1 组 */
-function focusNextBigGroup(bg) {
+/* 「上一组 / 下一组」：按容器内分组的顺序逐个把视野移到该组，首尾循环。
+   step = 1 下一个分组，step = -1 上一个分组。 */
+function focusBigGroupBy(bg, step) {
   const list = (bg.groupIds || [])
     .map(gid => ({ gid, members: getGroupItemObjects(gid) }))
     .filter(g => g.members.length > 0);
   if (!list.length) { toast("这个大组里还没有分组", 2200); return; }
-  const next = (((bg._viewIdx == null ? -1 : bg._viewIdx) + 1) % list.length + list.length) % list.length;
+  // 还没浏览过时：下一组从第 1 组开始，上一组从最后一组开始
+  const cur = bg._viewIdx == null ? (step > 0 ? -1 : 0) : bg._viewIdx;
+  const next = ((cur + step) % list.length + list.length) % list.length;
   bg._viewIdx = next;
   const members = list[next].members;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -494,6 +549,8 @@ function focusNextBigGroup(bg) {
   focusWorldRect(minX - BG_SUB_PAD, minY - BG_SUB_LABEL_H, maxX + BG_SUB_PAD, maxY + BG_SUB_PAD);
   toast(`组 ${next + 1} / ${list.length} · ${members.length} 张`, 1600);
 }
+function focusNextBigGroup(bg) { focusBigGroupBy(bg, 1); }
+function focusPrevBigGroup(bg) { focusBigGroupBy(bg, -1); }
 
 /* ---------- 卡片渲染 ----------
    新插入图片按「等比缩放到最长边 DISPLAY_MAX」显示，避免 4000x3000 的原图
@@ -522,7 +579,9 @@ function renderItems() {
     el.style.height = "";
     const wrapEl = el.querySelector(".card-img-wrap");
     if (wrapEl) wrapEl.style.height = (it.height || CARD_DEFAULT_W) + "px";
-    el.style.zIndex = it.z || zTop++;
+    // z 记忆在 item 上：首次渲染按顺序补 z（稳定），之后直接复用，
+    // 避免旧写法 zTop++ 每次渲染都自增导致层级漂移。
+    el.style.zIndex = it.z || (it.z = ++zTop);
     el.classList.toggle("selected", selection.has(it.id));
     el.classList.toggle("grouped", !!groupForItem(it.id));
   }
@@ -537,7 +596,7 @@ function createCardEl(it) {
   const el = document.createElement("div");
   el.className = "img-card";
   el.dataset.id = String(it.id);
-  el.style.zIndex = it.z || (++zTop);
+  el.style.zIndex = it.z || (it.z = ++zTop);
   el.innerHTML = `
     <div class="card-img-wrap">
       <img class="card-img" alt="" draggable="false" />
@@ -635,20 +694,8 @@ function selectItem(id, additive) {
   for (const [iid, el] of itemEls) el.classList.toggle("selected", selection.has(iid));
   syncImageToolbarBtns();
 }
-/* ---------- 组合按钮显隐：只有选中 ≥2 张时启用 ---------- */
-function syncCombineBtn() {
-  // 组合功能已下线（UI 隐藏，代码保留），不再同步显示
-  return;
-}
-/* ---------- 取消组合按钮显隐：只有恰好选中一张「有快照的组合图」时启用 ---------- */
-function syncUncombineBtn() {
-  // 组合功能已下线（UI 隐藏，代码保留），不再同步显示
-  return;
-}
-/* 一次调用同步两个按钮的显隐，任何 selection 变化后都调用它，避免遗漏。 */
+/* 一次调用同步所有工具栏按钮的显隐，任何 selection 变化后都调用它，避免遗漏。 */
 function syncImageToolbarBtns() {
-  syncCombineBtn();
-  syncUncombineBtn();
   syncGroupBtns();
   syncAlignBtns();
   syncClipboardBtns();
@@ -924,6 +971,7 @@ function createBigGroupEl(bg) {
         </select>
       </label>
       <span class="big-group-meta"></span>
+      <button class="big-group-prev" type="button" title="把视野移到上一个分组（到第 1 组后再往前回到最后一组）">上一组 ▴</button>
       <button class="big-group-next" type="button" title="把视野移到下一个分组（到最后一个后回到第 1 组）">下一组 ▾</button>
       <button class="big-group-del" type="button" title="删除大组（只删容器，图片保留）">×</button>
     </div>
@@ -943,6 +991,7 @@ function bindBigGroupEvents(el, bg) {
   const renameBtn = el.querySelector(".big-group-rename");
   const colsSel = el.querySelector(".big-group-cols select");
   const nextBtn = el.querySelector(".big-group-next");
+  const prevBtn = el.querySelector(".big-group-prev");
 
   // 拖动标题栏：容器与组内图片整体平移
   head.addEventListener("mousedown", e => {
@@ -1032,12 +1081,19 @@ function bindBigGroupEvents(el, bg) {
     });
   }
 
-  // 下一组：按容器内分组顺序逐个把视野移过去（看完最后一组回到第 1 组）
+  // 上一组 / 下一组：按容器内分组顺序逐个把视野移过去（首尾循环）
   if (nextBtn) {
     nextBtn.addEventListener("mousedown", e => e.stopPropagation());
     nextBtn.addEventListener("click", e => {
       e.stopPropagation();
       focusNextBigGroup(bg);
+    });
+  }
+  if (prevBtn) {
+    prevBtn.addEventListener("mousedown", e => e.stopPropagation());
+    prevBtn.addEventListener("click", e => {
+      e.stopPropagation();
+      focusPrevBigGroup(bg);
     });
   }
 
@@ -1170,6 +1226,65 @@ let _slideLoadToken = 0;
 let _slideGid = null;      // 当前放映的组 id
 let _slideChain = null;    // 同属一个大组里「有图的分组」id 顺序，用于「下一组」
 
+/* ---------- 放映缩放：滚轮以鼠标位置为中心放大/缩小，放大后可拖动平移 ---------- */
+const SLIDE_ZOOM_MIN = 1;
+const SLIDE_ZOOM_MAX = 8;
+let _slideZoom = 1;
+let _slidePanX = 0;
+let _slidePanY = 0;
+let _slideDrag = null;
+
+function applySlideZoom() {
+  if (!slideshowImg) return;
+  if (_slideZoom <= 1.0001) {
+    _slideZoom = 1;
+    _slidePanX = 0;
+    _slidePanY = 0;
+    slideshowImg.style.transform = "";
+    slideshowImg.classList.remove("is-zoomed");
+    return;
+  }
+  slideshowImg.style.transform = `translate(${_slidePanX}px, ${_slidePanY}px) scale(${_slideZoom})`;
+  slideshowImg.classList.add("is-zoomed");
+}
+
+function resetSlideZoom() {
+  _slideDrag = null;
+  if (slideshowImg) slideshowImg.classList.remove("is-dragging");
+  _slideZoom = 1;
+  _slidePanX = 0;
+  _slidePanY = 0;
+  applySlideZoom();
+}
+
+/* 平移范围限制在放大后的溢出部分，避免图片被拖出画面 */
+function clampSlidePan() {
+  if (!slideshowImg) return;
+  const mx = Math.max(0, (slideshowImg.offsetWidth * (_slideZoom - 1)) / 2);
+  const my = Math.max(0, (slideshowImg.offsetHeight * (_slideZoom - 1)) / 2);
+  _slidePanX = Math.max(-mx, Math.min(mx, _slidePanX));
+  _slidePanY = Math.max(-my, Math.min(my, _slidePanY));
+}
+
+function slideZoomAt(clientX, clientY, factor) {
+  if (!slideshowImg || !slideshowStage) return;
+  const z0 = _slideZoom;
+  const z1 = Math.max(SLIDE_ZOOM_MIN, Math.min(SLIDE_ZOOM_MAX, z0 * factor));
+  if (Math.abs(z1 - z0) < 1e-4) return;
+  // 以鼠标所在点为中心缩放：先取图片中心（不受 transform 影响）
+  const stageRect = slideshowStage.getBoundingClientRect();
+  const cx = stageRect.left + slideshowImg.offsetLeft + slideshowImg.offsetWidth / 2;
+  const cy = stageRect.top + slideshowImg.offsetTop + slideshowImg.offsetHeight / 2;
+  const dx = clientX - cx;
+  const dy = clientY - cy;
+  const k = z1 / z0;
+  _slidePanX = dx - k * (dx - _slidePanX);
+  _slidePanY = dy - k * (dy - _slidePanY);
+  _slideZoom = z1;
+  clampSlidePan();
+  applySlideZoom();
+}
+
 function slideshowOpen() {
   return !!slideshowEl && !slideshowEl.hidden;
 }
@@ -1215,6 +1330,7 @@ function slideshowGotoNextGroup() {
 function showSlide(i) {
   if (!_slideItems.length || !slideshowImg) return;
   _slideIndex = Math.max(0, Math.min(i, _slideItems.length - 1));
+  resetSlideZoom(); // 换图回到适应窗口的原始大小
   const it = _slideItems[_slideIndex];
   if (slideshowCounter) slideshowCounter.textContent = `${_slideIndex + 1} / ${_slideItems.length}`;
   if (slideshowCaption) slideshowCaption.textContent = it.title || "（无标题）";
@@ -1236,6 +1352,7 @@ function closeSlideshow() {
   _slideGid = null;
   _slideChain = null;
   _slideLoadToken++;
+  resetSlideZoom();
   if (slideshowImg) slideshowImg.removeAttribute("src");
 }
 function bindSlideshow() {
@@ -1247,6 +1364,38 @@ function bindSlideshow() {
   }
   if (slideshowBackdrop) slideshowBackdrop.addEventListener("click", closeSlideshow);
   if (slideshowClose) slideshowClose.addEventListener("click", closeSlideshow);
+  // 滚轮：以鼠标位置为中心放大/缩小（1x ~ 8x），阻止整页滚动
+  if (slideshowEl) {
+    slideshowEl.addEventListener("wheel", e => {
+      if (!slideshowOpen()) return;
+      e.preventDefault();
+      slideZoomAt(e.clientX, e.clientY, Math.pow(1.0015, -e.deltaY));
+    }, { passive: false });
+  }
+  // 放大后按住图片拖动平移，便于查看细节
+  if (slideshowImg) {
+    slideshowImg.addEventListener("pointerdown", e => {
+      if (_slideZoom <= 1) return;
+      e.preventDefault();
+      _slideDrag = { id: e.pointerId, x: e.clientX, y: e.clientY, panX: _slidePanX, panY: _slidePanY };
+      slideshowImg.classList.add("is-dragging");
+      try { slideshowImg.setPointerCapture(e.pointerId); } catch {}
+    });
+    slideshowImg.addEventListener("pointermove", e => {
+      if (!_slideDrag || e.pointerId !== _slideDrag.id) return;
+      _slidePanX = _slideDrag.panX + (e.clientX - _slideDrag.x);
+      _slidePanY = _slideDrag.panY + (e.clientY - _slideDrag.y);
+      clampSlidePan();
+      applySlideZoom();
+    });
+    const endSlideDrag = e => {
+      if (!_slideDrag || (e && e.pointerId !== _slideDrag.id)) return;
+      _slideDrag = null;
+      slideshowImg.classList.remove("is-dragging");
+    };
+    slideshowImg.addEventListener("pointerup", endSlideDrag);
+    slideshowImg.addEventListener("pointercancel", endSlideDrag);
+  }
   document.addEventListener("keydown", e => {
     if (!slideshowOpen()) return;
     if (e.key === "Escape") { e.preventDefault(); closeSlideshow(); }
@@ -1298,7 +1447,7 @@ function applyAlignment(which) {
       // 如果 items[i] 是同一个引用，x/y 已经改好；如果不是则同步一下
       if (items[idx] !== it) { items[idx].x = it.x; items[idx].y = it.y; }
     }
-    apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+    apiUpdateItem(it.id, it.x, it.y, w, h, it.title, it.z || 0);
   }
   const label = { "left":"左对齐","right":"右对齐","top":"上对齐","bottom":"下对齐","center-h":"水平居中","center-v":"垂直居中" }[which] || "对齐";
   toast(`${label}（${sel.length} 张）`);
@@ -1339,7 +1488,7 @@ function autoArrangeSelection(mode = "grid") {
       it.y = y;
       const el = itemEls.get(it.id);
       if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
-      apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+      apiUpdateItem(it.id, it.x, it.y, w, h, it.title, it.z || 0);
       y += h + BG_CAPTION_H + GAP;
     });
     toast(`已上下整理 ${sel.length} 张（自上而下、向左靠齐）`, 2200);
@@ -1356,7 +1505,7 @@ function autoArrangeSelection(mode = "grid") {
     it.y = Math.round(minY + Math.floor(i / cols) * (cellH + GAP));
     const el = itemEls.get(it.id);
     if (el) { el.style.left = it.x + "px"; el.style.top = it.y + "px"; }
-    apiUpdateItem(it.id, it.x, it.y, w, h, it.title);
+    apiUpdateItem(it.id, it.x, it.y, w, h, it.title, it.z || 0);
   });
   toast(`已左右整理 ${sel.length} 张（${cols} 列，无重叠）`, 2200);
 }
@@ -1378,7 +1527,7 @@ function debouncedSaveItem(id) {
   _itemSaveTimers.set(id, setTimeout(() => {
     const it = items.find(x => x.id === id);
     if (!it) return;
-    apiUpdateItem(it.id, it.x, it.y, it.width || CARD_DEFAULT_W, it.height || 0, it.title);
+    apiUpdateItem(it.id, it.x, it.y, it.width || CARD_DEFAULT_W, it.height || 0, it.title, it.z || 0);
     _itemSaveTimers.delete(id);
   }, 350));
 }
@@ -2349,7 +2498,15 @@ async function setActiveFolder(id) {
   } else {
     view = { x: 40, y: 40, zoom: 1 };
   }
-  items = await apiListItems(id);
+  // 快速连点切换夹时，旧的 apiListItems 可能晚于新的返回，把旧夹数据盖进新夹。
+  // 自增 token：await 返回后如果不是最新一次切换，直接放弃本次加载。
+  const token = ++_activeFolderToken;
+  const loaded = await apiListItems(id);
+  if (token !== _activeFolderToken) return;
+  items = loaded;
+  // zTop 接着本夹已持久化的最大 z 往上数，
+  // 否则重启后首次渲染补的 z 会和已保存的置顶 z 撞号。
+  zTop = Math.max(100, ...items.map(it => it.z || 0));
   // 必须等 items 就绪后再加载大组：pruneBigGroups 依赖当前夹的图片列表，
   // 否则会用旧夹（或空）的 items 把 groupIds 误判成空组清掉。
   loadBigGroupsForFolder(id);
@@ -2360,6 +2517,8 @@ async function setActiveFolder(id) {
   // 清理旧卡片 DOM
   for (const [, el] of itemEls) el.remove();
   itemEls.clear();
+  // 旧夹卡片的 blob URL 已无 DOM 引用，整批释放
+  releaseImgUrlsAll();
   selection.clear();
   applyView();
   renderFolderList();
@@ -2640,18 +2799,6 @@ function bindCanvasEvents() {
   });
 }
 
-async function newFolderAndUpload(files) {
-  // 保留作为兼容路径：极少数地方（外部入口）可能直接调用。
-  // 实际上传走 uploadFile，它会处理"没有激活夹"的情况。
-  if (!files || !files.length) return;
-  if (!activeFolder) {
-    const f = await apiCreateFolder("图片夹 " + (folders.length + 1));
-    folders.push(f);
-    await setActiveFolder(f.id);
-  }
-  for (const file of files) await uploadFile(file);
-}
-
 /* ---------- 工具栏 ---------- */
 function bindToolbar() {
   if (imageAddBtn) imageAddBtn.addEventListener("click", () => {
@@ -2789,43 +2936,6 @@ function bindNewFolderBtn() {
     await renderFolderList();
     const li = imageFolderListEl.querySelector(`li[data-id="${f.id}"]`);
     if (li) startRenameFolder(li, f);
-  });
-}
-function askInput(title, placeholder) {
-  // 自定义弹窗，避免与 main.js 的 modal 事件冲突（main.js 的 modal-ok 会创建任务夹）。
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay prompt-overlay";
-  overlay.innerHTML = `
-    <div class="modal">
-      <h3 class="prompt-title">${esc(title)}</h3>
-      <input class="prompt-input" type="text" maxlength="30" autocomplete="off" />
-      <div class="modal-actions">
-        <button class="prompt-cancel">取消</button>
-        <button class="primary prompt-ok">确定</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-  const input = overlay.querySelector(".prompt-input");
-  const okBtn = overlay.querySelector(".prompt-ok");
-  const cancelBtn = overlay.querySelector(".prompt-cancel");
-  input.placeholder = placeholder;
-  input.value = "";
-  requestAnimationFrame(() => { input.focus(); input.select(); });
-  return new Promise(resolve => {
-    let done = false;
-    const finish = (v) => {
-      if (done) return; done = true;
-      overlay.remove();
-      resolve(v);
-    };
-    okBtn.addEventListener("click", () => finish(input.value.trim() || null));
-    cancelBtn.addEventListener("click", () => finish(null));
-    input.addEventListener("keydown", ev => {
-      if (ev.key === "Enter") { ev.preventDefault(); finish(input.value.trim() || null); }
-      else if (ev.key === "Escape") { ev.preventDefault(); finish(null); }
-    });
-    overlay.addEventListener("click", e => { if (e.target === overlay) finish(null); });
   });
 }
 
@@ -2981,7 +3091,5 @@ function init() {
   window.__loadImageWall = () => loadFolders(true);
   // 初始加载一次（如果图片 tab 一开始就是 active 会显示）
   loadFolders(true);
-  // 刷新页面后按钮状态同步：让「↩ 取消组合」在存在快照时立即可见
-  syncUncombineBtn();
 }
 init();

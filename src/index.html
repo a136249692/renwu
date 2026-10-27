@@ -113,6 +113,7 @@
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="mind-group"   title="把选中的思维块打包成一组（至少 2 个，Ctrl/⌘ 点选）：之后点任意一块整组选中、一起拖动" hidden>📦 分组</button>
               <button id="mind-ungroup" title="解散选中思维块所在的分组" hidden>✂️ 解散分组</button>
+              <button id="mind-tidy"    title="左右整理选中的思维块：按网格排开，消除重叠（分组后用）" hidden>↔ 左右整理</button>
               <span class="tb-sep" aria-hidden="true"></span>
               <button id="mind-font-dec" title="减小节点字号">A−</button>
               <span id="mind-font-label" title="当前节点字号（整个导图统一）">13px</span>
@@ -229,18 +230,6 @@
         <span class="sticky-hint"><kbd>Ctrl+Enter</kbd> 保存</span>
         <button id="sticky-cancel">取消</button>
         <button class="sticky-save" id="sticky-save">保存</button>
-      </div>
-    </div>
-
-    <!-- 弹窗 -->
-    <div class="modal-overlay" id="modal" hidden>
-      <div class="modal">
-        <h3 id="modal-title">新建任务夹</h3>
-        <input id="folder-name-input" placeholder="请输入任务夹名称" maxlength="30" />
-        <div class="modal-actions">
-          <button id="modal-cancel">取消</button>
-          <button class="primary" id="modal-ok">确定</button>
-        </div>
       </div>
     </div>
 
@@ -381,9 +370,10 @@
                 title="看完这个组后直接看下一个分组（N）" hidden>下一组 ▸</button>
         <button class="slide-close" id="slideshow-close" title="关闭（Esc）">×</button>
       </div>
-      <div class="slide-stage">
+      <div class="slide-stage" id="slideshow-stage">
         <button class="slide-nav prev" id="slideshow-prev" title="上一张（←）">‹</button>
-        <img class="slide-img" id="slideshow-img" alt="" draggable="false" />
+        <img class="slide-img" id="slideshow-img" alt="" draggable="false"
+             title="滚轮放大缩小，放大后可拖动查看" />
         <button class="slide-nav next" id="slideshow-next" title="下一张（→）">›</button>
       </div>
       <div class="slide-foot">

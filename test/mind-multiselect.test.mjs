@@ -93,6 +93,30 @@ test("分组按钮只在多选 ≥2 个时出现，解散只在选中集合含�
   assert.ok(/groupOfNode\(id\)/.test(b), "解散按钮应检查选中集合是否属于分组");
 });
 
+test("分组支持「左右整理」：按网格排开、消除重叠并落库", () => {
+  assert.ok(/id="mind-tidy"/.test(HTML), "缺少 #mind-tidy 按钮");
+  assert.ok(/mindTidyBtn\.addEventListener\("click"[\s\S]{0,40}?tidyMindSelection\(\)/.test(MIND),
+    "左右整理按钮应绑定 tidyMindSelection");
+  const sync = fnBody("syncMindToolbarBtns");
+  assert.ok(/mindTidyBtn\.hidden = !\(activeMap && selectedNodeIds\.size >= 2\)/.test(sync),
+    "选中整组（或手动多选 ≥2 个）后应显示整理按钮");
+  const fn = fnBody("tidyMindSelection");
+  assert.ok(/\[\.\.\.selectedNodeIds\]/.test(fn), "应对当前选中集合整理（点组内任意一块已整组选中）");
+  assert.ok(/Math\.abs\(dy\) > 40[\s\S]{0,40}?a\.x - b\.x/.test(fn),
+    "应按上→下、左→右的阅读顺序排序");
+  assert.ok(/const cellW = Math\.max\(\.\.\.sel\.map\(n => nodeWidth\(n\)\)\)/.test(fn),
+    "单元格宽度应取选中块的最大宽度（含图片撑开的块）");
+  assert.ok(/const cols = Math\.max\(1, Math\.ceil\(Math\.sqrt\(ordered\.length\)\)\)/.test(fn),
+    "列数按平方根取整，保证左右铺开而不是单列");
+  assert.ok(/n\.x = Math\.round\(minX \+ \(i % cols\) \* \(cellW \+ GAP\)\)/.test(fn),
+    "每行按列左→右排开");
+  assert.ok(/n\.y = Math\.round\(minY \+ Math\.floor\(i \/ cols\) \* \(cellH \+ GAP\)\)/.test(fn),
+    "换行时下移一个单元格高度，块与块不重叠");
+  assert.ok(/apiUpdateNodePos\(n\.id, n\.x, n\.y\)/.test(fn), "整理后应逐个落库");
+  assert.ok(/renderEdges\(\)/.test(fn) && /renderMindGroupBoxes\(\)/.test(fn),
+    "整理后连线与分组虚线框应同步刷新");
+});
+
 test("分组数据按导图持久化到 localStorage", () => {
   assert.ok(/LS_MIND_GROUPS\s*=\s*"glassCanvas\.mindGroups"/.test(MIND), "应定义分组存储 key");
   assert.ok(/localStorage\.setItem\(LS_MIND_GROUPS/.test(fnBody("persistMindGroups")), "应落盘");

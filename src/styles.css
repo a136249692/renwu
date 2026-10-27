@@ -1864,7 +1864,8 @@ body.alt-pressed .img-card .card-tools { opacity: 1; }
   color: var(--faint);
   font-variant-numeric: tabular-nums;
 }
-/* 「下一组」：逐组把视野移过去，组多到要下拉/平移时用 */
+/* 「上一组 / 下一组」：逐组把视野移过去，组多到要下拉/平移时用 */
+.big-group-prev,
 .big-group-next {
   flex: none;
   height: 22px;
@@ -1881,6 +1882,7 @@ body.alt-pressed .img-card .card-tools { opacity: 1; }
   cursor: var(--cursor-arrow);
   transition: all 0.15s var(--ease);
 }
+.big-group-prev:hover,
 .big-group-next:hover { background: rgba(47, 109, 246, 0.16); }
 .big-group-del {
   margin-left: auto;
@@ -2041,6 +2043,8 @@ body.alt-pressed .img-card .card-tools { opacity: 1; }
   justify-content: center;
   gap: 14px;
   padding: 6px 20px;
+  /* 放大后的图片只在舞台内显示，不盖住标题栏和底部说明 */
+  overflow: hidden;
 }
 .slide-img {
   pointer-events: auto;
@@ -2050,7 +2054,13 @@ body.alt-pressed .img-card .card-tools { opacity: 1; }
   border-radius: 10px;
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
   background: rgba(255, 255, 255, 0.03);
+  transform-origin: 50% 50%;
+  will-change: transform;
+  user-select: none;
 }
+/* 滚轮放大后可拖动查看细节 */
+.slide-img.is-zoomed { cursor: grab; }
+.slide-img.is-dragging { cursor: grabbing; }
 .slide-nav {
   pointer-events: auto;
   flex: none;

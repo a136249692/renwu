@@ -124,6 +124,8 @@ pub struct ImageItem {
     pub width: f64,
     pub height: f64,
     pub created_at: i64,
+    /// 画布叠放层级（置顶），0 = 未设置（按插入顺序）
+    pub z: i64,
 }
 
 pub fn init_db(db_path: &std::path::Path) -> Connection {
@@ -276,6 +278,16 @@ fn migrate(conn: &Connection) {
     if !has_font {
         conn.execute_batch("ALTER TABLE mindmaps ADD COLUMN font_size INTEGER DEFAULT 13;")
             .expect("Failed to migrate mindmaps (font_size)");
+    }
+    // image_items.z：卡片在画布上的叠放层级（置顶），旧库补列，默认 0。
+    // 之前 z 只存在前端内存里，重启后置顶顺序全部丢失。
+    let has_z = conn
+        .prepare("SELECT z FROM image_items LIMIT 0")
+        .map(|_| true)
+        .unwrap_or(false);
+    if !has_z {
+        conn.execute_batch("ALTER TABLE image_items ADD COLUMN z INTEGER NOT NULL DEFAULT 0;")
+            .expect("Failed to migrate image_items (z)");
     }
 }
 
@@ -1170,8 +1182,8 @@ pub fn save_image(
     let title = title.trim().to_string();
     let result = conn
         .execute(
-            "INSERT INTO image_items (folder_id, file_name, file_path, title, x, y, width, height, created_at)
-             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, ?5)",
+            "INSERT INTO image_items (folder_id, file_name, file_path, title, x, y, width, height, created_at, z)
+             VALUES (?1, ?2, ?3, ?4, 0, 0, 0, 0, ?5, 0)",
             rusqlite::params![folder_id, file_name, rel, title, now],
         )
         .map_err(|e| e.to_string());
@@ -1187,6 +1199,7 @@ pub fn save_image(
             width: 0.0,
             height: 0.0,
             created_at: now,
+            z: 0,
         }),
         Err(e) => {
             // 写库失败，回收刚落盘的文件，避免出现无记录的文件
@@ -1199,7 +1212,7 @@ pub fn save_image(
 pub fn list_image_items(conn: &Connection, folder_id: i64) -> Result<Vec<ImageItem>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, folder_id, file_name, file_path, title, x, y, width, height, created_at
+            "SELECT id, folder_id, file_name, file_path, title, x, y, width, height, created_at, z
              FROM image_items WHERE folder_id = ?1 ORDER BY id ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -1216,6 +1229,7 @@ pub fn list_image_items(conn: &Connection, folder_id: i64) -> Result<Vec<ImageIt
                 width: row.get(7)?,
                 height: row.get(8)?,
                 created_at: row.get(9)?,
+                z: row.get(10)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -1232,10 +1246,11 @@ pub fn update_image_item(
     width: f64,
     height: f64,
     title: &str,
+    z: i64,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE image_items SET x = ?1, y = ?2, width = ?3, height = ?4, title = ?5 WHERE id = ?6",
-        rusqlite::params![x, y, width, height, title, id],
+        "UPDATE image_items SET x = ?1, y = ?2, width = ?3, height = ?4, title = ?5, z = ?6 WHERE id = ?7",
+        rusqlite::params![x, y, width, height, title, z, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
