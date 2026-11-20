@@ -134,8 +134,8 @@
               <b>双击空白处</b> 即可新建思维节点<br />
               拖节点上任意位置移动 · 单击文字编辑内容<br />
               悬停节点显示连接点，从连接点拖到另一节点即可连线<br />
-              选中节点后点工具栏「🖼 上传图片」可为该内容块加图（可多张，点击展开、再点放大）<br />
-              选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块
+              选中节点后点工具栏「🖼 上传图片」可为该内容块加图（可多张，入口只在工具栏）<br />
+              节点内只显示第一张缩略图，点击即放大查看：灯箱内可 ←/→ 切换、底部缩略图快速定位，工具条可「复制 / 剪切 / 删除」当前图
             </div>
           </div>
         </div>
@@ -336,7 +336,13 @@
       <button class="lb-nav lb-next" id="mind-lightbox-next" title="下一张（→）" hidden>›</button>
       <button class="lb-close" id="mind-lightbox-close" title="关闭（Esc）">×</button>
       <div class="lb-count" id="mind-lightbox-count" hidden></div>
+      <!-- 底部缩略图条：快速定位到本思维块内的任意一张图 -->
+      <div class="lb-strip" id="mind-lightbox-strip" hidden></div>
       <div class="lb-tools">
+        <button id="mind-lightbox-act-copy" title="复制这张图到其它思维块">⧉ 复制</button>
+        <button id="mind-lightbox-act-cut" title="剪切这张图到其它思维块">✂ 剪切</button>
+        <button id="mind-lightbox-act-del" class="lb-danger" title="移除这张图片">删除</button>
+        <span class="lb-sep"></span>
         <button id="mind-lightbox-zoom-out" title="缩小">−</button>
         <span id="mind-lightbox-zoom-label">100%</span>
         <button id="mind-lightbox-zoom-in" title="放大">＋</button>

@@ -1,8 +1,8 @@
 // 回归测试：思维节点内嵌图片
 // 用户诉求：
 //   1) 思维内容块里可以添加图片，一个内容块可加多张
-//   2) 点击可展开图片，展示「一行多列」
-//   3) 点击单张图片后可缩放显示（灯箱）
+//   2) 节点内默认只显示第一张缩略图，点击后放大查看
+//   3) 灯箱内可看上一张/下一张，底部缩略图可快速定位到指定图片
 // 覆盖：前端 UI/交互 + localStorage 兜底 + Rust 后端存储命令。
 // 运行方式：node test/mind-node-image.test.mjs
 
@@ -54,7 +54,6 @@ test("HTML 存在灯箱骨架（图片 + 缩放工具 + 关闭）", () => {
 test("定义节点图片 localStorage 键与内存状态", () => {
   assert.ok(/LS_NODE_IMGS\s*=\s*"glassCanvas\.mindNodeImgs"/.test(CODE));
   assert.ok(/const nodeImages\s*=\s*new Map\(\)/.test(CODE));
-  assert.ok(/const expandedImgs\s*=\s*new Set\(\)/.test(CODE));
 });
 
 // ---------- API：SQLite 优先 + localStorage 兜底 ----------
@@ -83,33 +82,26 @@ test("apiReadNodeImage 走 read_mindmap_node_image 并生成 blob URL", () => {
   assert.ok(/createObjectURL/.test(b));
 });
 
-// ---------- 渲染：折叠封面 + 展开一行多列 ----------
-test("renderNodeImages 折叠态显示封面缩略图 + 张数角标", () => {
+// ---------- 渲染：节点内只显示第一张 ----------
+test("renderNodeImages 只渲染第一张封面缩略图 + 张数角标", () => {
   const b = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/mind-node-cover/.test(b), "缺少折叠封面");
-  assert.ok(/cover-count/.test(b), "缺少张数角标");
-  assert.ok(/expandedImgs\.has\(n\.id\)/.test(b), "应按 expandedImgs 判断展开态");
+  assert.ok(/mind-node-cover/.test(b), "缺少封面缩略图");
+  assert.ok(/applyThumbSrc\(img, list\[0\]\)/.test(b), "封面应固定取第一张");
+  assert.ok(/cover-count/.test(b), "多图时应显示张数角标");
 });
 
-test("renderNodeImages 展开态渲染一行多列画廊", () => {
+test("点击封面直接进灯箱（不再有展开画廊）", () => {
   const b = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/mind-node-gallery/.test(b), "缺少画廊容器");
-  assert.ok(/mind-node-thumb/.test(b), "缺少缩略图");
+  assert.ok(/openLightbox\(list\[0\], list\)/.test(b), "点击封面应打开灯箱并传入同块列表");
+  assert.ok(!/mind-node-gallery/.test(b), "不应再渲染画廊");
+  assert.ok(!/mind-node-img-toggle/.test(b), "不应再有展开/收起按钮");
+  assert.ok(!/expandedImgs/.test(CODE), "展开态状态已移除");
 });
 
-test("点击画廊缩略图调用 openLightbox（进入缩放查看）", () => {
+test("节点有图时宽度固定，不随张数变化", () => {
   const b = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/openLightbox\(im, list\)/.test(b), "缩略图点击应触发 openLightbox");
-});
-
-test("展开/收起会重算连线（renderEdges）", () => {
-  const b = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(b.split("renderEdges()").length - 1 >= 2, "展开与收起都应调用 renderEdges");
-});
-
-test("缩略图支持移除（removeNodeImage）", () => {
-  const b = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/removeNodeImage\(n,\s*im\)/.test(b), "缩略图应有移除按钮");
+  assert.ok(/el\.style\.width = list\.length \? "322px" : ""/.test(b), "有图固定 322px，无图恢复默认");
+  assert.ok(!/Math\.min\(560/.test(b), "不应再按张数撑开宽度");
 });
 
 // ---------- 加图入口 ----------
@@ -212,9 +204,10 @@ test("删除节点图片前先弹 askConfirm，取消则不执行删除", () => 
 });
 
 // ---------- 样式 ----------
-test("CSS：画廊为一行多列（flex nowrap + 横向滚动）", () => {
-  assert.ok(/\.mind-node-gallery\s*\{[^}]*flex-wrap:\s*nowrap/.test(CSS));
-  assert.ok(/\.mind-node-gallery\s*\{[^}]*overflow-x:\s*auto/.test(CSS));
+test("CSS：封面可点击放大（zoom-in），画廊样式已移除", () => {
+  assert.ok(/\.mind-node-cover\s*\{[^}]*cursor:\s*zoom-in/.test(CSS), "封面应提示可放大");
+  assert.ok(!/\.mind-node-gallery\s*\{/.test(CSS), "画廊样式应移除");
+  assert.ok(!/\.mind-node-thumb\s*\{/.test(CSS), "节点内缩略图样式应移除");
 });
 
 // ---------- 布局：正文在左、图片在右 ----------
@@ -233,12 +226,12 @@ test("CSS：有图片的节点改为横向布局（正文在左、图片在右�
     "图片区不应再保留「正文下方」的上移量");
 });
 
-test("渲染：有图片时加 has-imgs，并按张数下发节点宽度", () => {
+test("渲染：有图片时加 has-imgs，无图时恢复默认宽度", () => {
   const b = fnBody(CODE, "function renderNodeImages");
   assert.ok(/classList\.toggle\("has-imgs",\s*list\.length\s*>\s*0\)/.test(b),
     "应按是否有图片切换 has-imgs");
-  assert.ok(/el\.style\.width\s*=\s*""/.test(b), "没有图片时应恢复默认宽度");
-  assert.ok(/210\s*\+\s*26\s*\+\s*Math\.max/.test(b), "展开态宽度应按缩略图张数撑开");
+  assert.ok(/el\.style\.width = list\.length \? "322px" : ""/.test(b),
+    "有图固定 322px，无图恢复默认宽度");
 });
 
 test("连线端点 / 命中测试 / fitView 使用实测节点宽度", () => {
@@ -249,10 +242,12 @@ test("连线端点 / 命中测试 / fitView 使用实测节点宽度", () => {
   assert.ok(/nodeWidth\(n\)/.test(fnBody(CODE, "function fitView")), "fitView 边界应按实测宽度计算");
 });
 
-test("CSS：存在灯箱与缩略图样式", () => {
+test("CSS：存在灯箱与底部缩略图条样式", () => {
   assert.ok(/\.img-lightbox\s*\{/.test(CSS));
-  assert.ok(/\.mind-node-thumb\s*\{/.test(CSS));
-  assert.ok(/cursor:\s*zoom-in/.test(CSS));
+  assert.ok(/\.lb-strip\s*\{/.test(CSS), "缺少缩略图条样式");
+  assert.ok(/\.lb-strip-thumb\s*\{/.test(CSS), "缺少缩略图条内的缩略图样式");
+  assert.ok(/\.lb-strip-thumb\.active/.test(CSS), "缺少当前图高亮样式");
+  assert.ok(/has-strip .lb-stage img/.test(CSS), "有条时应给大图留出底部空间");
 });
 
 // ---------- Rust 后端 ----------
@@ -346,12 +341,41 @@ test("HTML 灯箱含上一张/下一张按钮与计数", () => {
   assert.ok(/id="mind-lightbox-count"/.test(HTML), "缺少计数");
 });
 
-test("openLightbox 接收同块图片列表，缩略图点击传入列表", () => {
+test("openLightbox 接收同块图片列表，封面点击传入列表", () => {
   const b = fnBody(CODE, "async function openLightbox(");
   assert.ok(/lb\.list = arr/.test(b), "应记录图片集合");
+  assert.ok(/buildLightboxStrip\(\)/.test(b), "打开时应构建底部缩略图条");
   assert.ok(/showLightboxImage\(idx\)/.test(b), "应展示当前图片");
-  const r = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/openLightbox\(im, list\)/.test(r), "缩略图点击应把同块列表传给灯箱");
+  const r = fnBody(CODE, "function renderNodeImages");
+  assert.ok(/openLightbox\(list\[0\], list\)/.test(r), "封面点击应把同块列表传给灯箱");
+});
+
+// ---------- 灯箱底部缩略图条 ----------
+test("HTML 灯箱含底部缩略图条容器", () => {
+  assert.ok(/id="mind-lightbox-strip"/.test(HTML), "缺少 mind-lightbox-strip");
+});
+
+test("缩略图条按图片顺序生成，点击跳到指定张", () => {
+  const b = fnBody(CODE, "function buildLightboxStrip(");
+  assert.ok(/lb-strip-thumb/.test(b), "应渲染条内缩略图");
+  assert.ok(/lb\.list\.forEach/.test(b), "应遍历同块全部图片");
+  assert.ok(/showLightboxImage\(i\)/.test(b), "点击某张应跳到该张");
+  assert.ok(/has-strip/.test(b), "多图时应给灯箱加 has-strip 类");
+  assert.ok(/mindLightboxStrip\.hidden = !multi/.test(b), "单图时不显示条");
+});
+
+test("切换图片时同步高亮当前张并滚入可视区", () => {
+  const b = fnBody(CODE, "function syncLightboxStripActive(");
+  assert.ok(/classList\.toggle\("active"/.test(b), "应高亮当前张");
+  assert.ok(/scrollIntoView/.test(b), "当前张应滚入可视区");
+  const u = fnBody(CODE, "function updateLightboxChrome(");
+  assert.ok(/syncLightboxStripActive\(\)/.test(u), "每次切图都应刷新条内高亮");
+});
+
+test("关闭灯箱时清空缩略图条", () => {
+  const b = fnBody(CODE, "function closeLightbox(");
+  assert.ok(/mindLightboxStrip\.innerHTML = ""/.test(b), "应清空条内容");
+  assert.ok(/remove\("has-strip"\)/.test(b), "应移除 has-strip 类");
 });
 
 test("showLightboxImage 下标循环切换并重置缩放", () => {
@@ -391,11 +415,27 @@ test("定义思维块图片剪贴板状态与字节读取", () => {
   assert.ok(/function base64ToBytes\(/.test(CODE), "缺少 base64ToBytes 兜底解码");
 });
 
-test("renderNodeImages 缩略图提供复制/剪切入口", () => {
-  const r = fnBody(CODE, "function renderNodeImages(");
-  assert.ok(/thumb-acts/.test(r), "缺少悬停操作条");
-  assert.ok(/copyNodeImage\(n, im, "copy"\)/.test(r), "缺少复制按钮");
-  assert.ok(/copyNodeImage\(n, im, "cut"\)/.test(r), "缺少剪切按钮");
+test("图片复制/剪切/删除入口在灯箱工具条（按当前查看的那张）", () => {
+  assert.ok(/id="mind-lightbox-act-copy"/.test(HTML), "缺少复制按钮");
+  assert.ok(/id="mind-lightbox-act-cut"/.test(HTML), "缺少剪切按钮");
+  assert.ok(/id="mind-lightbox-act-del"/.test(HTML), "缺少删除按钮");
+  const b = fnBody(CODE, "function bindLightbox(");
+  assert.ok(/currentLightboxImage\(\)/.test(b), "操作应针对当前查看的图片");
+  assert.ok(/copyNodeImage\(n, im, "copy"\)/.test(b), "复制按钮应调用 copyNodeImage");
+  assert.ok(/copyNodeImage\(n, im, "cut"\)/.test(b), "剪切按钮应调用 copyNodeImage");
+  assert.ok(/removeNodeImage\(n, im\)/.test(b), "删除按钮应调用 removeNodeImage");
+});
+
+test("删除当前图前先关灯箱（确认弹窗层级低于灯箱）", () => {
+  const b = fnBody(CODE, "function bindLightbox(");
+  const idxClose = b.indexOf("closeLightbox();");
+  const idxDel = b.indexOf("removeNodeImage(n, im)");
+  assert.ok(idxClose >= 0 && idxDel > idxClose, "应先关灯箱再弹确认删除");
+});
+
+test("currentLightboxNode 按 node_id 找回所属思维块", () => {
+  const b = fnBody(CODE, "function currentLightboxNode(");
+  assert.ok(/nodes\.find\(x => x\.id === im\.node_id\)/.test(b), "应能定位图片所属节点");
 });
 
 test("copyNodeImage 快照图片字节并标记 copy/cut", () => {
@@ -431,9 +471,10 @@ test("paste 事件在无外部图片时回退到应用内剪贴板", () => {
   assert.ok(/pasteNodeImages\(targetId\)/.test(b), "应调用 pasteNodeImages");
 });
 
-test("CSS：缩略图复制/剪切按钮与粘贴按钮样式存在", () => {
-  assert.ok(/\.mind-node-thumb \.thumb-acts\s*\{/.test(CSS), "缺少 .thumb-acts");
-  assert.ok(/\.thumb-act\s*\{/.test(CSS), "缺少 .thumb-act");
+test("CSS：缩略图条与灯箱工具条操作样式存在", () => {
+  assert.ok(/\.lb-strip\s*\{/.test(CSS), "缺少 .lb-strip");
+  assert.ok(/\.lb-strip-thumb\s*\{/.test(CSS), "缺少 .lb-strip-thumb");
+  assert.ok(/\.lb-tools button\.lb-danger:hover/.test(CSS), "缺少删除按钮的悬停样式");
   assert.ok(/\.mind-node-paste-img\s*\{/.test(CSS), "缺少 .mind-node-paste-img");
 });
 

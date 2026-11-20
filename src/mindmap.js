@@ -146,6 +146,10 @@ const mindLightboxZoomLabel = $("mind-lightbox-zoom-label");
 const mindLightboxReset = $("mind-lightbox-reset");
 const mindLightboxPrev = $("mind-lightbox-prev");
 const mindLightboxNext = $("mind-lightbox-next");
+const mindLightboxStrip = $("mind-lightbox-strip");
+const mindLightboxActCopy = $("mind-lightbox-act-copy");
+const mindLightboxActCut = $("mind-lightbox-act-cut");
+const mindLightboxActDel = $("mind-lightbox-act-del");
 const mindLightboxCount = $("mind-lightbox-count");
 
 /* ---------- 状态 ---------- */
@@ -171,7 +175,6 @@ let _activeMapToken = 0;       // setActiveMap 异步竞态守卫：快速切换
 
 /* 节点图片状态 */
 const nodeImages = new Map();  // nodeId -> [{ id, node_id, file_name, file_path }]
-const expandedImgs = new Set();// 处于「展开画廊」状态的 nodeId
 const imgUrlCache = new Map(); // file_path -> objectURL/dataURL（或正在读取的 Promise）
 let _pendingImgNodeId = null;  // 文件选择框当前要写入的目标节点
 /* 思维块图片剪贴板：复制/剪切后可到其它思维块粘贴（Ctrl+V 或点「粘贴」）。
@@ -455,6 +458,7 @@ function releaseImgUrl(filePath) {
 /* ═══════════ 模式切换 ═══════════ */
 function setMode(m) {
   if (mode === m) return;
+  const prev = mode;
   mode = m;
   tabTasks.classList.toggle("active", m === "tasks");
   tabMind.classList.toggle("active", m === "mind");
@@ -467,6 +471,12 @@ function setMode(m) {
   folderListEl.hidden = m !== "tasks";
   modeBodyMind.hidden = m !== "mind";
   modeBodyImages.hidden = m !== "images";
+  /* 离开任务 tab 前先把滚动位置强制落库：pane 一旦 display:none，
+     浏览器会把 canvas.scrollTop 归零并派发 scroll 事件；若 200ms 的
+     保存 debounce 还没落库，归零值会被当成新位置保存，切回来就回顶。 */
+  if (prev === "tasks" && m !== "tasks" && typeof window.__saveTaskScroll === "function") {
+    window.__saveTaskScroll(true);
+  }
   // 画布容器
   folderPane.hidden = m !== "tasks";
   mindPane.hidden = m !== "mind";
@@ -486,7 +496,9 @@ function setMode(m) {
   //    导致切回任务 tab 时布局从不重算 → todo 区内容块堆积/重叠。
   if (m === "tasks") {
     requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (typeof window.renderAll === "function") window.renderAll();
+      // restore=true：切回任务 tab 时 pane 刚由 display:none 恢复，
+      // scrollTop 已被浏览器归零，必须用离开时保存的位置还原。
+      if (typeof window.renderAll === "function") window.renderAll(true);
       // 若用户开启了「靠左对齐」且当前不是便利贴夹，切回后再对齐一次，
       // 保证对齐偏好在跨 tab 往返后仍生效（relayout 本身不强制重新对齐）。
       const tg = window.__getAlignToggle && window.__getAlignToggle();
@@ -842,7 +854,6 @@ function loadNodeImages(list) {
 /* 切换导图时清空节点图片相关状态与已缓存的 blob URL */
 function clearMindImages() {
   nodeImages.clear();
-  expandedImgs.clear();
   for (const key of Array.from(imgUrlCache.keys())) releaseImgUrl(key);
 }
 function renderMindHeader() {
@@ -894,7 +905,7 @@ function renderMindCanvas() {
   renderMindGroupBoxes();
   // 空状态提示
   if (nodes.length === 0) {
-    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>按住 <kbd>Ctrl/⌘</kbd> 点选多个思维块后，点工具栏「📦 分组」可打包成一组：之后点组内任一块整组选中、一起拖动<br/>节点内不再常驻「＋ 图片」按钮，选中节点后点工具栏「🖼 上传图片」即可加图（可多张，点击展开、再点放大）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 悬停缩略图可「复制 / 剪切」到其它思维块`;
+    mindEmpty.innerHTML = `<b>双击空白处</b> 即可新建思维节点<br/>拖动节点可自由移动（正文/边框/把手均可拖）· 双击正文编辑文字<br/>悬停节点显示连接点，从连接点拖到另一节点连线<br/>按住 <kbd>Ctrl/⌘</kbd> 点选多个思维块后，点工具栏「📦 分组」可打包成一组：之后点组内任一块整组选中、一起拖动<br/>节点内不再常驻「＋ 图片」按钮，选中节点后点工具栏「🖼 上传图片」即可加图（可多张，节点内只显示第一张缩略图，点击放大查看）<br/>选中节点后 <kbd>Ctrl/⌘ + V</kbd> 可粘贴截图或任意位置复制的图片 · 灯箱内可 ←/→ 切换、底部缩略图定位，并可「复制 / 剪切 / 删除」当前图`;
     mindEmpty.hidden = false;
   } else {
     mindEmpty.hidden = true;
@@ -930,8 +941,8 @@ function forbidImageDownload(imgEl) {
   imgEl.addEventListener("contextmenu", e => e.preventDefault());
   imgEl.addEventListener("dragstart", e => e.preventDefault());
 }
-/* 折叠态：一张封面缩略图 + 张数角标（点击展开）。
-   展开态：一行多列横向画廊（点击单张进灯箱缩放查看）。
+/* 节点内只显示第一张图：默认展示封面缩略图（多图时带张数角标），点击直接进灯箱看大图。
+   灯箱里可左右切换、底部缩略图快速定位，图片的复制/剪切/删除也在灯箱工具条里。
    加图入口已移到顶部工具栏（选中思维块后才出现），内容块里不再常驻「＋ 图片」按钮。 */
 function renderNodeImages(n, el) {
   if (!el) return;
@@ -939,18 +950,10 @@ function renderNodeImages(n, el) {
   if (!wrap) return;
   wrap.innerHTML = "";
   const list = nodeImages.get(n.id) || [];
-  const expanded = expandedImgs.has(n.id);
   // 有图片时节点切换为「正文在左、图片在右」的横向布局：
-  // 正文固定 210，图片列按状态留宽（折叠=封面 + 展开按钮，展开=按张数，最多 5 张宽度，其余横向滚动）
+  // 正文固定 210，图片列只放一张封面，宽度固定（不再按张数撑开）
   el.classList.toggle("has-imgs", list.length > 0);
-  if (!list.length) {
-    el.style.width = "";
-  } else if (expanded) {
-    const thumbsW = Math.min(list.length, 5) * 62 - 6;
-    el.style.width = Math.min(560, 210 + 26 + Math.max(64, thumbsW)) + "px";
-  } else {
-    el.style.width = "322px";
-  }
+  el.style.width = list.length ? "322px" : "";
   wrap.hidden = false;
 
   if (list.length === 0) {
@@ -960,77 +963,24 @@ function renderNodeImages(n, el) {
     return;
   }
 
-  if (!expanded) {
-    // 折叠：封面缩略图 + 计数
-    const cover = document.createElement("div");
-    cover.className = "mind-node-cover";
-    cover.title = `共 ${list.length} 张 · 点击展开查看`;
-    const img = document.createElement("img");
-    img.alt = "";
-    forbidImageDownload(img);
-    applyThumbSrc(img, list[0]);
-    cover.appendChild(img);
+  // 封面：仅第一张
+  const cover = document.createElement("div");
+  cover.className = "mind-node-cover";
+  cover.title = list.length > 1 ? `共 ${list.length} 张 · 点击查看大图` : "点击查看大图";
+  const img = document.createElement("img");
+  img.alt = "";
+  forbidImageDownload(img);
+  applyThumbSrc(img, list[0]);
+  cover.appendChild(img);
+  if (list.length > 1) {
     const cnt = document.createElement("span");
     cnt.className = "cover-count";
     cnt.textContent = String(list.length);
     cover.appendChild(cnt);
-    const doExpand = e => { e.stopPropagation(); expandedImgs.add(n.id); renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); };
-    cover.addEventListener("click", doExpand);
-    wrap.appendChild(cover);
-
-    const toggle = document.createElement("button");
-    toggle.className = "mind-node-img-toggle";
-    toggle.textContent = `展开 ${list.length} 张 ▸`;
-    toggle.addEventListener("click", doExpand);
-    wrap.appendChild(toggle);
-    appendNodeImgBar(wrap, n.id);
-    return;
   }
+  cover.addEventListener("click", e => { e.stopPropagation(); openLightbox(list[0], list); });
+  wrap.appendChild(cover);
 
-  // 展开：一行多列
-  const gallery = document.createElement("div");
-  gallery.className = "mind-node-gallery";
-  for (const im of list) {
-    const thumb = document.createElement("div");
-    thumb.className = "mind-node-thumb";
-    thumb.title = "点击放大查看";
-    const img = document.createElement("img");
-    img.alt = "";
-    forbidImageDownload(img);
-    applyThumbSrc(img, im);
-    thumb.appendChild(img);
-    const del = document.createElement("button");
-    del.className = "thumb-del";
-    del.textContent = "×";
-    del.title = "移除这张图片";
-    del.addEventListener("click", e => { e.stopPropagation(); removeNodeImage(n, im); });
-    thumb.appendChild(del);
-    // 悬停操作条：复制 / 剪切到其它思维块
-    const acts = document.createElement("div");
-    acts.className = "thumb-acts";
-    const cp = document.createElement("button");
-    cp.className = "thumb-act";
-    cp.textContent = "⧉";
-    cp.title = "复制到其它思维块";
-    cp.addEventListener("click", e => { e.stopPropagation(); copyNodeImage(n, im, "copy"); });
-    const ct = document.createElement("button");
-    ct.className = "thumb-act";
-    ct.textContent = "✂";
-    ct.title = "剪切到其它思维块";
-    ct.addEventListener("click", e => { e.stopPropagation(); copyNodeImage(n, im, "cut"); });
-    acts.appendChild(cp);
-    acts.appendChild(ct);
-    thumb.appendChild(acts);
-    thumb.addEventListener("click", e => { e.stopPropagation(); openLightbox(im, list); });
-    gallery.appendChild(thumb);
-  }
-  wrap.appendChild(gallery);
-
-  const toggle = document.createElement("button");
-  toggle.className = "mind-node-img-toggle";
-  toggle.textContent = "收起 ▾";
-  toggle.addEventListener("click", e => { e.stopPropagation(); expandedImgs.delete(n.id); renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); });
-  wrap.appendChild(toggle);
   appendNodeImgBar(wrap, n.id);
 }
 /* 图片条只承载「粘贴到本块」按钮：加图入口在顶部工具栏，选中节点后出现。
@@ -1052,7 +1002,7 @@ async function applyThumbSrc(imgEl, im) {
    - 单击正文 = 仅选中（不进编辑，方便连续选多个或马上拖）
    - 双击正文 = 进入文本编辑
    - 正在编辑中：正文允许选文字/输入，不触发拖拽
-   - 图片条（画廊/缩略图/加图按钮）与删除按钮各自处理，不冒泡到节点拖动 */
+   - 图片区（封面缩略图/粘贴按钮）与删除按钮各自处理，不冒泡到节点拖动 */
 function bindNodeEvents(el, n) {
   el.addEventListener("pointerdown", e => { downOnNode(e, el, n); });
   el.querySelector(".rm-node").addEventListener("click", e => {
@@ -1096,7 +1046,6 @@ async function removeNode(id) {
   selectedNodeIds.delete(id);
   if (editingNode && editingNode.id === id) editingNode = null;
   if (nodeImages.has(id)) { for (const im of nodeImages.get(id)) releaseImgUrl(im.file_path); nodeImages.delete(id); }
-  expandedImgs.delete(id);
   await apiDeleteNode(id);   // 后端同步级联删除相关连线，API 内部会清理内存状态
   renderMindCanvas();
   renderMindHeader();
@@ -1134,7 +1083,6 @@ async function addImagesToNode(nodeId, files) {
   if (!ok) return 0;
   const n = nodes.find(x => x.id === nodeId);
   const el = nodeEls.get(nodeId);
-  expandedImgs.add(nodeId);   // 添加后自动展开，便于立刻看到刚加的图
   if (n && el) { renderNodeImages(n, el); renderEdges(); renderMindGroupBoxes(); }
   toast(`已添加 ${ok} 张图片`);
   return ok;
@@ -1333,8 +1281,8 @@ function refreshAllNodeImages() {
   }
 }
 
-/* ---------- 图片灯箱（缩放查看 + 多图切换） ---------- */
-/* 打开灯箱：list 为同一思维块内的全部图片，用于左右切换查看。 */
+/* ---------- 图片灯箱（缩放查看 + 多图切换 + 底部缩略图定位） ---------- */
+/* 打开灯箱：list 为同一思维块内的全部图片，可左右切换；多图时底部出缩略图条。 */
 async function openLightbox(im, list) {
   const arr = (Array.isArray(list) && list.length) ? list.slice() : [im];
   let idx = arr.findIndex(x => x.id === im.id);
@@ -1342,7 +1290,44 @@ async function openLightbox(im, list) {
   lb.list = arr;
   lb.index = idx;
   mindLightbox.hidden = false;
+  buildLightboxStrip();
   await showLightboxImage(idx);
+}
+/* 底部缩略图条：多图时按顺序铺开，点击任意一张直接跳过去 */
+function buildLightboxStrip() {
+  if (!mindLightboxStrip) return;
+  mindLightboxStrip.innerHTML = "";
+  const multi = lb.list.length > 1;
+  mindLightbox.classList.toggle("has-strip", multi);
+  mindLightboxStrip.hidden = !multi;
+  if (!multi) return;
+  lb.list.forEach((im, i) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "lb-strip-thumb";
+    btn.title = `${i + 1} / ${lb.list.length}`;
+    const img = document.createElement("img");
+    img.alt = "";
+    forbidImageDownload(img);
+    applyThumbSrc(img, im);
+    btn.appendChild(img);
+    btn.addEventListener("click", e => { e.stopPropagation(); showLightboxImage(i); });
+    mindLightboxStrip.appendChild(btn);
+  });
+}
+/* 高亮当前图并把它滚到条带可视范围内 */
+function syncLightboxStripActive() {
+  if (!mindLightboxStrip || mindLightboxStrip.hidden) return;
+  const thumbs = mindLightboxStrip.children;
+  for (let i = 0; i < thumbs.length; i++) thumbs[i].classList.toggle("active", i === lb.index);
+  const cur = thumbs[lb.index];
+  if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: "nearest", inline: "center" });
+}
+/* 当前查看的图片 / 它所属的思维块（复制、剪切、删除都在灯箱里操作当前图） */
+function currentLightboxImage() { return lb.list[lb.index] || null; }
+function currentLightboxNode() {
+  const im = currentLightboxImage();
+  return im ? nodes.find(x => x.id === im.node_id) : null;
 }
 /* 展示第 i 张（下标循环）。切换时重置缩放/平移，避免上一张的变换残留。 */
 async function showLightboxImage(i) {
@@ -1374,12 +1359,15 @@ function updateLightboxChrome() {
     mindLightboxCount.hidden = !multi;
     mindLightboxCount.textContent = multi ? `${lb.index + 1} / ${n}` : "";
   }
+  syncLightboxStripActive();
 }
 function closeLightbox() {
   if (!mindLightbox || mindLightbox.hidden) return;
   mindLightbox.hidden = true;
   mindLightboxImg.removeAttribute("src");
   lb = { scale: 1, tx: 0, ty: 0, dragging: false, moved: false, list: [], index: 0 };
+  if (mindLightboxStrip) { mindLightboxStrip.innerHTML = ""; mindLightboxStrip.hidden = true; }
+  mindLightbox.classList.remove("has-strip");
   updateLightboxChrome();
 }
 function applyLightboxTransform() {
@@ -1413,6 +1401,25 @@ function bindLightbox() {
   mindLightboxReset.addEventListener("click", lightboxReset);
   if (mindLightboxPrev) mindLightboxPrev.addEventListener("click", e => { e.stopPropagation(); lightboxStep(-1); });
   if (mindLightboxNext) mindLightboxNext.addEventListener("click", e => { e.stopPropagation(); lightboxStep(1); });
+  // 当前图的复制 / 剪切 / 删除（原先挂在画廊缩略图上的操作统一收进灯箱工具条）
+  if (mindLightboxActCopy) mindLightboxActCopy.addEventListener("click", e => {
+    e.stopPropagation();
+    const im = currentLightboxImage(), n = currentLightboxNode();
+    if (im && n) copyNodeImage(n, im, "copy");
+  });
+  if (mindLightboxActCut) mindLightboxActCut.addEventListener("click", e => {
+    e.stopPropagation();
+    const im = currentLightboxImage(), n = currentLightboxNode();
+    if (im && n) copyNodeImage(n, im, "cut");
+  });
+  if (mindLightboxActDel) mindLightboxActDel.addEventListener("click", e => {
+    e.stopPropagation();
+    const im = currentLightboxImage(), n = currentLightboxNode();
+    if (!im || !n) return;
+    // 确认弹窗的层级低于灯箱，先关灯箱再弹确认，避免弹窗被挡住
+    closeLightbox();
+    removeNodeImage(n, im);
+  });
   // 点击舞台空白处（非图片）关闭；拖拽平移后不误关
   mindLightboxStage.addEventListener("click", e => {
     if (e.target === mindLightboxStage && !lb.moved) closeLightbox();
@@ -1771,7 +1778,7 @@ let _suppressClickUntil = 0;
 function downOnNode(e, el, n) {
   if (e.button !== 0) return;
   e.stopPropagation();
-  // 图片区（封面/画廊/加图/删除按钮）交互不触发整节点拖动
+  // 图片区（封面缩略图/粘贴按钮）交互不触发整节点拖动
   if (e.target.closest(".mind-node-imgs")) return;
   // 正在编辑的节点：允许选择文字，不触发整节点拖动
   if (editingNode && editingNode.id === n.id && e.target.closest(".mind-node-body")) return;
