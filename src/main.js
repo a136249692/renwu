@@ -101,7 +101,7 @@ async function migrateOrphansToSqlite() {
   if (migrated > 0) {
     toast(`数据库已恢复，${migrated} 条本地缓存已同步。`);
     // 重新加载当前夹，让回灌的数据出现在画布上
-    if (activeFolderId) { await reloadFolders(); await reloadTasks(); renderAll(); }
+    if (activeFolderId) { await reloadFolders(); await reloadTasks(); renderAll(true); }
   }
 }
 
@@ -583,6 +583,7 @@ function saveAlignMode(folderId, val) {
 const $ = id => document.getElementById(id);
 const canvas = $("canvas");
 const board = $("board");
+const taskPane = $("mode-pane-tasks");
 const canvasWrap = $("canvas-wrap");
 const divider = $("divider");
 const reviewDivider = $("review-divider");
@@ -702,28 +703,29 @@ function setDoneVisible(fid, n) {
     localStorage.setItem(DONE_VISIBLE_KEY, JSON.stringify(m));
   } catch {}
 }
+/* 追加一批历史已完成，返回「段顶实际插入高度」（0 = 没有可加载的）。
+   不能用条数 × 固定行高估算：行高会随文本换行变化，估算误差会让视口停在
+   半截位置；分界线下移量就是其他内容被向下推的距离，用它补偿最准确。 */
 function loadMoreDone() {
-  if (!activeFolderId) return false;
+  if (!activeFolderId) return 0;
   const cur = getDoneVisible(activeFolderId);
   const total = blocks.filter(b => b.stage === "done").length;
-  if (cur >= total) return false;
+  if (cur >= total) return 0;
+  const y0 = dividerY();
   setDoneVisible(activeFolderId, Math.min(total, cur + DONE_PAGE_STEP));
   relayout(false);
   persistAllStackedPositions();
-  return true;
+  return Math.max(0, dividerY() - y0);
 }
 
 /* 「加载更多」胶囊点击：追加一批历史已完成。tailLimit 语义下新加载块插入段顶，
    点击后把视口向上滚动让新加载的内容进入视野（用户接下来看到的是更老的记录）。 */
 document.getElementById("load-more-done")?.addEventListener("click", e => {
   e.stopPropagation();
-  const beforeVisible = getDoneVisible(activeFolderId);
-  if (!loadMoreDone()) return;
-  const afterVisible = getDoneVisible(activeFolderId);
-  const added = afterVisible - beforeVisible;
-  if (added > 0) {
+  const delta = loadMoreDone();
+  if (delta > 0) {
     requestAnimationFrame(() => {
-      canvas.scrollTo({ top: Math.max(0, canvas.scrollTop - added * 44 + 14), behavior: "smooth" });
+      canvas.scrollTo({ top: Math.max(0, canvas.scrollTop - delta + 14), behavior: "smooth" });
     });
   }
 });
@@ -1275,7 +1277,7 @@ function startFolderPointerDrag(e, srcId, srcEl) {
 }
 
 /* ---------- 渲染画布（协调式：新增才建，多余才删） ---------- */
-function renderAll() {
+function renderAll(restore = false) {
   renderFolders();
   const f = folders.find(x => x.id === activeFolderId);
   if (!f) {
@@ -1321,10 +1323,12 @@ function renderAll() {
     renderStickyHeader();
     // 便利贴夹同样按夹记忆滚动位置——此前只有普通夹分支调用 restoreScroll，
     // 便利贴夹的内容块一多、滚到偏下位置后重开就必然回到顶端。
-    restoreScroll();
+    if (restore) restoreScroll();
   } else {
     relayout(false);
-    restoreScroll();
+    /* 只有「冷启动 / 切夹 / 切回 tab」才恢复记忆位置；resize、新建、粘贴等
+       重绘必须保留当前视口，否则 200ms 保存 debounce 未落库时会被旧值拉回顶部。 */
+    if (restore) restoreScroll();
     /* 恢复 board-empty 的默认文案（避免从便利贴夹切回时显示便签文案） */
     boardEmpty.classList.remove("search-empty");
     if (blocks.length === 0) {
@@ -1592,8 +1596,16 @@ function renderStickyHeader() {
 /* 定位一个已存在的块元素 */
 function encodePos(el, b) {
   el.style.top = b.y + "px";
-  if (b.row) { el.style.left = ""; el.style.right = "20px"; }
-  else el.style.left = b.x + "px";
+  if (b.row) {
+    el.style.left = "";
+    el.style.right = "20px";
+  } else {
+    el.style.left = b.x + "px";
+    /* 必须清掉 row 期写入的 right：同时存在 left/right 会把块从「按内容
+       自适应宽度」拉伸成整行宽度（max-width 510px），既视觉异常，也会让
+       findFreeSpot 按测量时的窄宽度避让、落位后却变宽压住邻居。 */
+    el.style.right = "";
+  }
 }
 
 /* 堆叠区（done / review）通用布局：
@@ -1654,6 +1666,45 @@ function layoutDoneRows(insertB) {
 /* 下一次 relayout 要把哪个块按 drop 位置插入对应堆叠区（拖入时设置，relayout 消费后立即清空） */
 let pendingInsert = null;      // done 段
 let pendingReviewInsert = null; // review 段
+
+/* 窗口变窄后，右侧列的待完成块可用宽度不足，会被压缩到 min-width 180px 并换行变高，
+   与下一行重叠（resize 后回到任务 tab 的典型现象）。这里分两步：
+     1) 把右边缘越界的块整体左移回画布内，宽度恢复自适应后往往不再换行；
+     2) 仍然相交的块按「上→下、左→右」顺序做一次避让，只挪后处理的块。
+   只调整待完成区；堆叠区由 layoutStackedRows 负责。隐藏态/对齐模式/放大态跳过。 */
+function normalizeTodoLayout(bottomY) {
+  if (!canvas.clientHeight || !board.clientWidth) return;
+  if (alignMode || isStickyFolderActive()) return;
+  if (board.querySelector(".block.zoomed")) return;
+  const maxRight = board.clientWidth - 16;
+  const todo = blocks
+    .filter(b => b.stage === "todo")
+    .sort((a, b) => (a.y - b.y) || (a.x - b.x));
+
+  for (const b of todo) {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el || el.style.display === "none" || !el.offsetWidth) continue;
+    // 最多校正两次：左移后换行消失、宽度可能变大，需要再压一次边界
+    for (let i = 0; i < 2 && b.x + el.offsetWidth > maxRight; i++) {
+      b.x = Math.max(16, maxRight - el.offsetWidth);
+      encodePos(el, b);
+    }
+  }
+
+  const placed = [];
+  for (const b of todo) {
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    if (!el || el.style.display === "none" || !el.offsetWidth) continue;
+    let w = el.offsetWidth, h = el.offsetHeight;
+    if (placed.some(p => rectsOverlap(b.x, b.y, w, h, p.x, p.y, p.w, p.h))) {
+      findFreeSpot(b, bottomY, false);
+      encodePos(el, b);
+      persistBlockPosition(b);
+      w = el.offsetWidth; h = el.offsetHeight;
+    }
+    placed.push({ x: b.x, y: b.y, w, h });
+  }
+}
 
 /* 就地重排：只改位置/类名，不重建 DOM（无闪烁、无 blockIn 重播）。
    三段布局：
@@ -1751,6 +1802,9 @@ function relayout(initial) {
       persistBlockPosition(b);
     }
   }
+
+  // 窗口宽度变化后校正待完成区的越界/换行重叠（必须在统计画布高度前完成）
+  normalizeTodoLayout(ry);
 
   const todo = blocks.filter(b => b.stage === "todo").length;
   const review = blocks.filter(b => b.stage === "review").length;
@@ -2071,6 +2125,9 @@ function makeBlock(b) {
     }
     mirrorNow();
     autoSize(el, b, title);
+    /* autoSize 在下一帧才写入 minWidth，宽度变化还可能再触发换行；
+       等两帧布局稳定后再做一次压叠检测/重排。 */
+    requestAnimationFrame(() => requestAnimationFrame(() => settleAfterEdit(el, b)));
   });
   title.addEventListener("keydown", e => {
     // 中文输入法组词阶段回车是"上屏"，不应作提交/换行处理
@@ -2150,6 +2207,40 @@ function autoSize(el, b, title) {
     el.style.minWidth = w + "px";
     b.w = w;
   });
+}
+
+/* 编辑提交后的收尾排版：块可能因换行 / 新增行变高。
+   - 已完成 / 待确认是堆叠布局：整段重排，后续行跟着下移；
+   - 待完成是自由摆放：没有自动重排，检测到压住邻居时按当前落点重新避让；
+   - 靠左对齐模式：直接按实测高度重新堆栈。
+   便利贴夹由 CSS Grid 负责，不处理。 */
+function settleAfterEdit(el, b) {
+  if (!el || !el.isConnected) return;
+  if (taskPane && (taskPane.hidden || !canvas.clientHeight)) return;
+  if (isStickyFolderActive()) return;
+  if (b.stage !== "todo") {
+    // 行位置由 relayout 按顺序重新计算，编辑只改变高度、不改变相对顺序，
+    // 无需逐条回写数据库（否则一次编辑会触发几十次 IPC）。
+    relayout(false);
+    return;
+  }
+  if (alignMode) { alignPendingBlocks([]); return; }
+  const r = el.getBoundingClientRect();
+  let hit = false;
+  for (const o of blocks) {
+    if (o.id === b.id || o.stage !== "todo") continue;
+    const oe = board.querySelector(`.block[data-id="${o.id}"]`);
+    if (!oe) continue;
+    const or = oe.getBoundingClientRect();
+    if (rectsOverlap(r.left, r.top, r.width, r.height, or.left, or.top, or.width, or.height)) {
+      hit = true; break;
+    }
+  }
+  if (!hit) return;
+  findFreeSpot(b, reviewY(), false);
+  encodePos(el, b);
+  persistBlockPosition(b);
+  relayout(false);   // 新落点可能更低，重算画布高度保证可滚动
 }
 
 /* ---------- 编辑态 ---------- */
@@ -2247,7 +2338,20 @@ canvas.addEventListener("dblclick", e => {
     blocks.push(nb);
     renderAll();
     // 对齐模式下立即把新块塞到栈底，视觉与「输入内容后追加到最下边行」一致
-    if (alignMode && !isStickyFolderActive()) alignPendingBlocks([nb.id]);
+    if (alignMode && !isStickyFolderActive()) {
+      alignPendingBlocks([nb.id]);
+    } else {
+      /* 双击落点可能已被其它块占用：按实时尺寸向右/下避让，
+         避免新块直接压在旧块上（落点空闲时位置保持不变）。 */
+      const el = board.querySelector(`.block[data-id="${nb.id}"]`);
+      if (el) {
+        findFreeSpot(nb, reviewY(), false);
+        encodePos(el, nb);
+        persistBlockPosition(nb);
+        relayout(false);
+      }
+      nb.__justCreated = false;
+    }
     mirrorNow();
     const el = board.querySelector(`.block[data-id="${nb.id}"]`);
     if (el) startEdit(el, nb);
@@ -2271,6 +2375,24 @@ canvas.addEventListener("paste", e => {
   createTasksFromPaste(text, e.clientX, e.clientY);
 });
 
+/* 粘贴块逐个按「实测块高」向下排：固定 62px 步进在块高 68px 时必然重叠。
+   每个块先尝试用户落点（同一 x），被占用时由 findFreeSpot 向右/下避让；
+   下一个块的起点取上一个块的实际底部 + 12。 */
+function placePastedBlocks(list, x, y) {
+  let cursor = y;
+  for (const b of list) {
+    b.x = x;
+    b.y = cursor;
+    b.__justCreated = false;
+    const el = board.querySelector(`.block[data-id="${b.id}"]`);
+    findFreeSpot(b, reviewY(), false);
+    if (el) encodePos(el, b);
+    persistBlockPosition(b);
+    cursor = b.y + (el ? el.offsetHeight : 48) + 12;
+  }
+  relayout(false);   // 整列可能超出原画布高度，重算以容纳全部新块
+}
+
 async function createTasksFromPaste(text, clientX, clientY) {
   const lines = text.split(/\r?\n/).map(s => s.replace(/\s+$/,"")).filter(s => s.trim().length > 0);
   if (!lines.length) return;
@@ -2280,10 +2402,9 @@ async function createTasksFromPaste(text, clientX, clientY) {
   // 粘贴只创建待完成块，若粘贴点在待完成区上方，强制落到待完成区顶端附近
   let py = Math.round(clientY - rect.top);
   if (py < ry + 24) py = ry + 24;
-  const GAP = 62; // 估算每行块高度 + 间距
   const created = [];
-  for (let i = 0; i < lines.length; i++) {
-    const nb = await api.createTask(activeFolderId, lines[i], px, py + i * GAP);
+  for (const line of lines) {
+    const nb = await api.createTask(activeFolderId, line, px, py);
     nb.__justCreated = true; // 同双击创建：保护本轮 relayout 的初始 y
     blocks.push(nb);
     created.push(nb);
@@ -2292,6 +2413,9 @@ async function createTasksFromPaste(text, clientX, clientY) {
   // 对齐模式下：把这一批新块全部追加到栈底（旧块保持视觉顺序不动）
   if (alignMode && !isStickyFolderActive()) {
     alignPendingBlocks(created.map(x => x.id));
+    created.forEach(b => { b.__justCreated = false; });
+  } else {
+    placePastedBlocks(created, px, py);
   }
   mirrorNow();
   toast(lines.length > 1
@@ -2763,7 +2887,7 @@ async function removeFolder(id) {
   delete orderMap[String(id)];
   saveFolderOrderMap(orderMap);
   await reloadTasks();
-  renderAll();
+  renderAll(true);
 }
 
 /* 内联的 confirm 弹窗实现：与 mindmap.js / image-wall.js 里的 askConfirm 语义一致，
@@ -3242,6 +3366,7 @@ let _restoreTargetX = 0;
 let _restoreTargetY = 0;
 let _restoreActive = false;    // 恢复进行中（尚未到达目标）
 let _restoreLockUntil = 0;     // 该时间戳之前到来的 scroll 事件不回写
+let _scrollDirty = false;      // 用户已滚动但 200ms debounce 尚未落库
 
 function _applyRestoreTarget() {
   if (!_restoreActive || activeFolderId == null) return;
@@ -3257,6 +3382,13 @@ function _endRestore() {
 }
 function restoreScroll() {
   if (activeFolderId == null) return;
+  /* 用户刚滚动过、200ms 的保存 debounce 还没落库时，renderAll（resize /
+     新建 / 粘贴 / 切回 tab）不能拿旧记忆覆盖当前视口——旧值常见为 0，
+     会造成「刚滚到一半突然回到顶部」。先把当前位置强制落库，再直接返回。 */
+  if (_scrollDirty) {
+    saveScroll(true);
+    return;
+  }
   let s;
   try { s = _scrollMap()[String(activeFolderId)] || { x: 0, y: 0 }; }
   catch { s = { x: 0, y: 0 }; }
@@ -3281,6 +3413,12 @@ function saveScroll(force) {
   // 恢复期间浏览器 clamp 产生的 scroll 是「假位置」，不能覆盖真实记忆；
   // force=true（切夹/页面隐藏/卸载）表示必须记录当前真实位置，仍允许写入。
   if (!force && (_restoreActive || Date.now() < _restoreLockUntil)) return;
+  /* pane 隐藏时 scrollTop 恒为 0，是浏览器 display:none 造成的假值：
+     - 切 tab 后迟到的 200ms debounce 会在这里触发，写 0 会覆盖离开时保存的真实位置；
+     - 在思维/图片 tab 关窗时 beforeunload/pagehide 的 force 保存同样会写 0。
+     离开任务 tab 的那一刻已经 force 保存过，这里直接丢弃即可。 */
+  if (taskPane && (taskPane.hidden || !canvas.clientHeight)) return;
+  if (force) clearTimeout(canvas._t);
   try {
     const map = _scrollMap();
     // 恢复尚未完成时，当前 scrollTop 可能是被 clamp 的假值，改用「目标值」落库
@@ -3288,21 +3426,29 @@ function saveScroll(force) {
     const y = _restoreActive ? _restoreTargetY : canvas.scrollTop;
     map[String(activeFolderId)] = { x, y };
     localStorage.setItem(SCROLL_KEY, JSON.stringify(map));
+    _scrollDirty = false;
   } catch {}
 }
 canvas.addEventListener("scroll", () => {
   // 恢复期的程序化滚动不参与保存，也不触发「向上加载更多」
   if (_restoreActive || Date.now() < _restoreLockUntil) return;
+  // 切到其它 tab 时 pane 被 display:none，浏览器会把 scrollTop 归零并派发
+  // scroll 事件；这不是用户滚动，不能标记 dirty / 回写，否则位置丢失。
+  if (taskPane && taskPane.hidden) return;
+  if (!canvas.clientHeight) return;
+  _scrollDirty = true;
   clearTimeout(canvas._t);
   canvas._t = setTimeout(saveScroll, 200);
   // 已完成区分页：滚到画布顶部时若还有历史隐藏，自动追加一批。
-  // tailLimit 语义下，追加的更老 done 块会插入到段顶；
-  // 保持 scrollTop 不变，让新加载的内容自然出现在视口顶部，符合"向上滚动加载更多"的直觉。
+  // 块是绝对定位，浏览器原生 scroll anchoring 对它们不生效；更老的记录插入
+  // 段顶后会把当前内容整体向下推，所以必须按实测插入高度同步下移 scrollTop，
+  // 保持用户正在看的那一条不移位（否则视口会突然跳到最老的历史记录）。
   if (canvas.scrollTop < 40) {
     const beforeTotal = blocks.filter(b => b.stage === "done").length;
     const beforeVisible = getDoneVisible(activeFolderId);
     if (beforeVisible < beforeTotal) {
-      loadMoreDone();
+      const delta = loadMoreDone();
+      if (delta > 0) canvas.scrollTop += delta;
     }
   }
 });
@@ -3338,7 +3484,7 @@ async function selectFolder(id) {
   savedPositions = {};
   alignToggle.checked = alignMode;
   await reloadTasks();
-  renderAll();
+  renderAll(true);
   if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
 }
 async function reloadTasks() {
@@ -3604,7 +3750,8 @@ async function boot() {
   // 保证从磁盘加载回来的旧块也重新堆栈。
   alignMode = activeFolderId ? getAlignMode(activeFolderId) : false;
   alignToggle.checked = alignMode;
-  renderAll();
+  // 冷启动恢复上次会话的滚动位置（renderAll 默认不恢复，需显式传 true）
+  renderAll(true);
   // 首次进入时如开启了对齐，立即对齐已有块。走「纯重排」路径（[]），
   // 保留用户上次手动对齐时的视觉顺序，不做「追加到栈底」的重排。
   if (alignMode && !isStickyFolderActive()) alignPendingBlocks([]);
@@ -3633,6 +3780,7 @@ boot();
    mindmap.js 的 setMode 依赖此钩子在「切回任务 tab」时触发 relayout，
    否则双 rAF 后的布局重算永远走不到，导致 todo 区内容块堆积/重叠。 */
 window.renderAll = renderAll;
+window.__saveTaskScroll = saveScroll;
 window.__alignPendingBlocks = alignPendingBlocks;
 window.__getAlignToggle = () => alignToggle;
 window.__isStickyFolderActive = () => isStickyFolderActive();
